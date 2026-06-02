@@ -583,6 +583,7 @@ export class CustomizeView extends LitElement {
             toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
             toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
             nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
+            newContext: isMac ? 'Cmd+Shift+Enter' : 'Ctrl+Shift+Enter',
             previousResponse: isMac ? 'Cmd+[' : 'Ctrl+[',
             nextResponse: isMac ? 'Cmd+]' : 'Ctrl+]',
             scrollUp: isMac ? 'Cmd+Shift+Up' : 'Ctrl+Shift+Up',
@@ -663,6 +664,11 @@ export class CustomizeView extends LitElement {
                 key: 'nextStep',
                 name: 'Ask Next Step',
                 description: 'Take screenshot and ask AI for the next step suggestion',
+            },
+            {
+                key: 'newContext',
+                name: 'New Context',
+                description: 'Reset the live session and start a fresh task on the next screenshot',
             },
             {
                 key: 'previousResponse',
@@ -1088,7 +1094,7 @@ export class CustomizeView extends LitElement {
                                 <div class="form-description">
                                     ${
                                         this.selectedScreenshotInterval === 'manual'
-                                            ? 'Screenshots will only be taken when you use the "Ask Next Step" shortcut'
+                                            ? 'Screenshots will only be taken when you use the "Ask Next Step" or "New Context" shortcut'
                                             : 'Automatic screenshots will be taken at the specified interval'
                                     }
                                 </div>

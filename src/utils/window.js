@@ -149,6 +149,7 @@ function getDefaultKeybinds() {
         toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
         toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
         nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
+        newContext: isMac ? 'Cmd+Shift+Enter' : 'Ctrl+Shift+Enter',
         previousResponse: isMac ? 'Cmd+[' : 'Ctrl+[',
         nextResponse: isMac ? 'Cmd+]' : 'Ctrl+]',
         scrollUp: isMac ? 'Cmd+Shift+Up' : 'Ctrl+Shift+Up',
@@ -261,6 +262,25 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
             console.log(`Registered nextStep: ${keybinds.nextStep}`);
         } catch (error) {
             console.error(`Failed to register nextStep (${keybinds.nextStep}):`, error);
+        }
+    }
+
+    // Register new context shortcut (starts a fresh session and captures a new screenshot)
+    if (keybinds.newContext) {
+        try {
+            globalShortcut.register(keybinds.newContext, async () => {
+                console.log('New context shortcut triggered');
+                try {
+                    await mainWindow.webContents.executeJavaScript(`
+                        cheddar.resetContextAndCapture();
+                    `);
+                } catch (error) {
+                    console.error('Error handling new context shortcut:', error);
+                }
+            });
+            console.log(`Registered newContext: ${keybinds.newContext}`);
+        } catch (error) {
+            console.error(`Failed to register newContext (${keybinds.newContext}):`, error);
         }
     }
 

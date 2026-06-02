@@ -2,7 +2,7 @@ if (require('electron-squirrel-startup')) {
     process.exit(0);
 }
 
-const { app, BrowserWindow, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, systemPreferences } = require('electron');
 const { createWindow, updateGlobalShortcuts } = require('./utils/window');
 const { setupGeminiIpcHandlers, stopMacOSAudioCapture, sendToRenderer } = require('./utils/gemini');
 const { initializeRandomProcessNames } = require('./utils/processRandomizer');
@@ -23,6 +23,7 @@ function createMainWindow() {
 app.whenReady().then(async () => {
     // Apply anti-analysis measures with random delay
     await applyAntiAnalysisMeasures();
+    await setupMacOSPermissions();
 
     createMainWindow();
     setupGeminiIpcHandlers(geminiSessionRef);
@@ -47,6 +48,41 @@ app.on('activate', () => {
 });
 
 function setupGeneralIpcHandlers() {
+    ipcMain.handle('get-macos-permission-status', async () => {
+        if (process.platform !== 'darwin') {
+            return { supported: false };
+        }
+
+        return {
+            supported: true,
+            microphone: systemPreferences.getMediaAccessStatus('microphone'),
+            screen: systemPreferences.getMediaAccessStatus('screen'),
+        };
+    });
+
+    ipcMain.handle('request-macos-microphone-access', async () => {
+        if (process.platform !== 'darwin') {
+            return { supported: false, granted: false };
+        }
+
+        try {
+            const granted = await systemPreferences.askForMediaAccess('microphone');
+            return {
+                supported: true,
+                granted,
+                status: systemPreferences.getMediaAccessStatus('microphone'),
+            };
+        } catch (error) {
+            console.error('Error requesting macOS microphone access:', error);
+            return {
+                supported: true,
+                granted: false,
+                status: systemPreferences.getMediaAccessStatus('microphone'),
+                error: error.message,
+            };
+        }
+    });
+
     // Config-related IPC handlers
     ipcMain.handle('set-onboarded', async (event) => {
         try {
@@ -155,4 +191,27 @@ function setupGeneralIpcHandlers() {
             return 'System Monitor';
         }
     });
+}
+
+async function setupMacOSPermissions() {
+    if (process.platform !== 'darwin') {
+        return;
+    }
+
+    const microphoneStatus = systemPreferences.getMediaAccessStatus('microphone');
+    const screenStatus = systemPreferences.getMediaAccessStatus('screen');
+
+    console.log('macOS permission status:', {
+        microphone: microphoneStatus,
+        screen: screenStatus,
+    });
+
+    if (microphoneStatus === 'not-determined') {
+        try {
+            const granted = await systemPreferences.askForMediaAccess('microphone');
+            console.log('macOS microphone prompt result:', granted);
+        } catch (error) {
+            console.error('Failed to request macOS microphone access:', error);
+        }
+    }
 }

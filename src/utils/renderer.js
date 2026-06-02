@@ -561,8 +561,55 @@ async function captureManualScreenshot(imageQuality = null) {
         `);
 }
 
+async function resetContextAndCapture() {
+    console.log('Reset context shortcut triggered');
+
+    const app = cheddar.element();
+    const profile = app?.selectedProfile || localStorage.getItem('selectedProfile') || 'interview';
+    const language = app?.selectedLanguage || localStorage.getItem('selectedLanguage') || 'en-US';
+    const screenshotInterval = app?.selectedScreenshotInterval || localStorage.getItem('selectedScreenshotInterval') || '5';
+    const imageQuality = app?.selectedImageQuality || localStorage.getItem('selectedImageQuality') || 'medium';
+
+    if (app) {
+        app.responses = [];
+        app.currentResponseIndex = -1;
+        app._awaitingNewResponse = true;
+        app._currentResponseIsComplete = true;
+        if (typeof app.requestUpdate === 'function') {
+            app.requestUpdate();
+        }
+    }
+
+    stopCapture();
+
+    try {
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            await ipcRenderer.invoke('close-session');
+        }
+
+        const initialized = await initializeGemini(profile, language);
+        if (!initialized) {
+            console.error('Failed to initialize Gemini for new context');
+            return { success: false, error: 'Failed to initialize Gemini session' };
+        }
+
+        await startCapture(screenshotInterval, imageQuality);
+
+        if (screenshotInterval === 'manual' || screenshotInterval === 'Manual') {
+            await captureManualScreenshot(imageQuality);
+        }
+
+        return { success: true };
+    } catch (error) {
+        console.error('Error resetting context:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 // Expose functions to global scope for external access
 window.captureManualScreenshot = captureManualScreenshot;
+window.resetContextAndCapture = resetContextAndCapture;
 
 function stopCapture() {
     if (screenshotInterval) {
@@ -767,6 +814,7 @@ const cheddar = {
     startCapture,
     stopCapture,
     sendTextMessage,
+    resetContextAndCapture,
     handleShortcut,
 
     // Conversation history functions

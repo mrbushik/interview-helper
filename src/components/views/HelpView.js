@@ -259,6 +259,7 @@ export class HelpView extends LitElement {
             toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
             toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
             nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
+            newContext: isMac ? 'Cmd+Shift+Enter' : 'Ctrl+Shift+Enter',
             previousResponse: isMac ? 'Cmd+[' : 'Ctrl+[',
             nextResponse: isMac ? 'Cmd+]' : 'Ctrl+]',
             scrollUp: isMac ? 'Cmd+Shift+Up' : 'Ctrl+Shift+Up',
@@ -351,6 +352,10 @@ export class HelpView extends LitElement {
                             <div class="shortcut-item">
                                 <span class="shortcut-description">Take screenshot and ask for next step</span>
                                 <div class="shortcut-keys">${this.formatKeybind(this.keybinds.nextStep)}</div>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-description">Start fresh task context on next screenshot</span>
+                                <div class="shortcut-keys">${this.formatKeybind(this.keybinds.newContext)}</div>
                             </div>
                         </div>
 

@@ -173,7 +173,7 @@ export class CheatingDaddyApp extends LitElement {
         this.statusText = text;
         
         // Mark response as complete when we get certain status messages
-        if (text.includes('Ready') || text.includes('Listening') || text.includes('Error')) {
+        if (text.includes('Ready') || text.includes('Error')) {
             this._currentResponseIsComplete = true;
             console.log('[setStatus] Marked current response as complete');
         }
@@ -285,6 +285,15 @@ export class CheatingDaddyApp extends LitElement {
         this.currentView = 'assistant';
     }
 
+    async handleNewContext() {
+        if (window.cheddar?.resetContextAndCapture) {
+            await window.cheddar.resetContextAndCapture();
+            return;
+        }
+
+        await this.handleStart();
+    }
+
     async handleAPIKeyHelp() {
         if (window.require) {
             const { ipcRenderer } = window.require('electron');
@@ -345,6 +354,14 @@ export class CheatingDaddyApp extends LitElement {
         this.currentResponseIndex = e.detail.index;
         this.shouldAnimateResponse = false;
         this.requestUpdate();
+    }
+
+    handleResponseSaved(e) {
+        const response = e?.detail?.response;
+        if (response) {
+            this.setStatus('Saved current response');
+            console.log('[handleResponseSaved] Saved response:', response);
+        }
     }
 
     // Onboarding event handlers
@@ -446,10 +463,10 @@ export class CheatingDaddyApp extends LitElement {
                         .onSendText=${message => this.handleSendText(message)}
                         .shouldAnimateResponse=${this.shouldAnimateResponse}
                         @response-index-changed=${this.handleResponseIndexChanged}
+                        @response-saved=${e => this.handleResponseSaved(e)}
                         @response-animation-complete=${() => {
                             this.shouldAnimateResponse = false;
-                            this._currentResponseIsComplete = true;
-                            console.log('[response-animation-complete] Marked current response as complete');
+                            console.log('[response-animation-complete] Animation finished');
                             this.requestUpdate();
                         }}
                     ></assistant-view>

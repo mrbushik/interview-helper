@@ -7,6 +7,10 @@ module.exports = {
         extraResource: ['./src/assets/SystemAudioDump'],
         name: 'Cheating Daddy',
         icon: 'src/assets/logo',
+        extendInfo: {
+            NSMicrophoneUsageDescription: 'Cheating Daddy needs microphone access to capture audio during sessions.',
+            NSAudioCaptureUsageDescription: 'Cheating Daddy needs audio capture access to analyze system sound during sessions.',
+        },
         // use `security find-identity -v -p codesigning` to find your identity
         // for macos signing
         // also fuck apple

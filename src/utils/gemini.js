@@ -26,6 +26,11 @@ module.exports.formatSpeakerResults = formatSpeakerResults;
 // Audio capture variables
 let systemAudioProc = null;
 let messageBuffer = '';
+let systemAudioRestartTimer = null;
+let stopRequestedForSystemAudio = false;
+let systemAudioRestartAttempts = 0;
+const MAX_SYSTEM_AUDIO_RESTART_ATTEMPTS = 5;
+const SYSTEM_AUDIO_RESTART_DELAY_MS = 1500;
 
 // Reconnection tracking variables
 let reconnectionAttempts = 0;
@@ -227,6 +232,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     const client = new GoogleGenAI({
         vertexai: false,
         apiKey: apiKey,
+        apiVersion: 'v1alpha',
     });
 
     // Get enabled tools first to determine Google Search status
@@ -239,10 +245,11 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     if (!isReconnection) {
         initializeNewSession();
     }
+    messageBuffer = '';
 
     try {
         const session = await client.live.connect({
-            model: 'gemini-live-2.5-flash-preview',
+            model: 'gemini-2.5-flash-native-audio-preview-12-2025',
             callbacks: {
                 onopen: function () {
                     sendToRenderer('update-status', 'Live session connected');
@@ -263,6 +270,11 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                                 sendToRenderer('update-response', messageBuffer);
                             }
                         }
+                    }
+
+                    if (message.serverContent?.outputTranscription?.text) {
+                        messageBuffer += message.serverContent.outputTranscription.text;
+                        sendToRenderer('update-response', messageBuffer);
                     }
 
                     if (message.serverContent?.generationComplete) {
@@ -331,7 +343,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 },
             },
             config: {
-                responseModalities: ['TEXT'],
+                responseModalities: ['AUDIO'],
                 tools: enabledTools,
                 // Enable speaker diarization
                 inputAudioTranscription: {
@@ -340,7 +352,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     maxSpeakerCount: 2,
                 },
                 contextWindowCompression: { slidingWindow: {} },
-                speechConfig: { languageCode: language },
+                outputAudioTranscription: {},
                 systemInstruction: {
                     parts: [{ text: systemPrompt }],
                 },
@@ -389,11 +401,24 @@ function killExistingSystemAudioDump() {
     });
 }
 
-async function startMacOSAudioCapture(geminiSessionRef) {
+async function startMacOSAudioCapture(geminiSessionRef, options = {}) {
     if (process.platform !== 'darwin') return false;
 
-    // Kill any existing SystemAudioDump processes first
-    await killExistingSystemAudioDump();
+    const { skipKillExisting = false, resetRestartAttempts = true } = options;
+
+    // Kill any existing SystemAudioDump processes first unless this is an internal restart
+    if (!skipKillExisting) {
+        await killExistingSystemAudioDump();
+    }
+
+    stopRequestedForSystemAudio = false;
+    if (resetRestartAttempts) {
+        systemAudioRestartAttempts = 0;
+    }
+    if (systemAudioRestartTimer) {
+        clearTimeout(systemAudioRestartTimer);
+        systemAudioRestartTimer = null;
+    }
 
     console.log('Starting macOS audio capture with SystemAudioDump...');
 
@@ -467,17 +492,29 @@ async function startMacOSAudioCapture(geminiSessionRef) {
     });
 
     systemAudioProc.stderr.on('data', data => {
-        console.error('SystemAudioDump stderr:', data.toString());
+        const stderrText = data.toString();
+        console.error('SystemAudioDump stderr:', stderrText);
+
+        if (stderrText.includes('Stream was stopped by the system')) {
+            scheduleSystemAudioRestart(geminiSessionRef, 'system stopped the stream');
+        }
     });
 
     systemAudioProc.on('close', code => {
         console.log('SystemAudioDump process closed with code:', code);
         systemAudioProc = null;
+
+        if (!stopRequestedForSystemAudio && code !== 0) {
+            scheduleSystemAudioRestart(geminiSessionRef, `process exited with code ${code}`);
+        }
     });
 
     systemAudioProc.on('error', err => {
         console.error('SystemAudioDump process error:', err);
         systemAudioProc = null;
+        if (!stopRequestedForSystemAudio) {
+            scheduleSystemAudioRestart(geminiSessionRef, err.message || 'process error');
+        }
     });
 
     return true;
@@ -496,11 +533,53 @@ function convertStereoToMono(stereoBuffer) {
 }
 
 function stopMacOSAudioCapture() {
+    stopRequestedForSystemAudio = true;
+    if (systemAudioRestartTimer) {
+        clearTimeout(systemAudioRestartTimer);
+        systemAudioRestartTimer = null;
+    }
     if (systemAudioProc) {
         console.log('Stopping SystemAudioDump...');
         systemAudioProc.kill('SIGTERM');
         systemAudioProc = null;
     }
+}
+
+function scheduleSystemAudioRestart(geminiSessionRef, reason) {
+    if (stopRequestedForSystemAudio) {
+        return;
+    }
+
+    if (systemAudioRestartAttempts >= MAX_SYSTEM_AUDIO_RESTART_ATTEMPTS) {
+        console.error('SystemAudioDump restart limit reached; not restarting again:', reason);
+        return;
+    }
+
+    if (systemAudioRestartTimer) {
+        return;
+    }
+
+    systemAudioRestartAttempts += 1;
+    console.warn(
+        `Scheduling SystemAudioDump restart ${systemAudioRestartAttempts}/${MAX_SYSTEM_AUDIO_RESTART_ATTEMPTS} after ${SYSTEM_AUDIO_RESTART_DELAY_MS}ms due to: ${reason}`
+    );
+
+    systemAudioRestartTimer = setTimeout(async () => {
+        systemAudioRestartTimer = null;
+
+        if (stopRequestedForSystemAudio) {
+            return;
+        }
+
+        try {
+            await startMacOSAudioCapture(geminiSessionRef, {
+                skipKillExisting: true,
+                resetRestartAttempts: false,
+            });
+        } catch (error) {
+            console.error('Failed to restart SystemAudioDump:', error);
+        }
+    }, SYSTEM_AUDIO_RESTART_DELAY_MS);
 }
 
 async function sendAudioToGemini(base64Data, geminiSessionRef) {

@@ -289,6 +289,14 @@ export class AssistantView extends LitElement {
         .save-button svg {
             stroke: currentColor !important;
         }
+
+        .shortcut-hint {
+            font-size: 11px;
+            color: var(--description-color);
+            white-space: nowrap;
+            margin-left: 2px;
+            opacity: 0.85;
+        }
     `;
 
     static properties = {
@@ -307,6 +315,7 @@ export class AssistantView extends LitElement {
         this.selectedProfile = 'interview';
         this.onSendText = () => {};
         this._lastAnimatedWordCount = 0;
+        this.boundSaveShortcutHandler = null;
         // Load saved responses from localStorage
         try {
             this.savedResponses = JSON.parse(localStorage.getItem('savedResponses') || '[]');
@@ -471,6 +480,18 @@ export class AssistantView extends LitElement {
             ipcRenderer.on('scroll-response-up', this.handleScrollUp);
             ipcRenderer.on('scroll-response-down', this.handleScrollDown);
         }
+
+        this.boundSaveShortcutHandler = e => {
+            const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+            const isSaveShortcut = isMac ? e.metaKey && e.shiftKey && e.key.toLowerCase() === 's' : e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 's';
+
+            if (isSaveShortcut) {
+                e.preventDefault();
+                this.saveCurrentResponse();
+            }
+        };
+
+        document.addEventListener('keydown', this.boundSaveShortcutHandler);
     }
 
     disconnectedCallback() {
@@ -491,6 +512,11 @@ export class AssistantView extends LitElement {
             if (this.handleScrollDown) {
                 ipcRenderer.removeListener('scroll-response-down', this.handleScrollDown);
             }
+        }
+
+        if (this.boundSaveShortcutHandler) {
+            document.removeEventListener('keydown', this.boundSaveShortcutHandler);
+            this.boundSaveShortcutHandler = null;
         }
     }
 
@@ -532,6 +558,13 @@ export class AssistantView extends LitElement {
             ];
             // Save to localStorage for persistence
             localStorage.setItem('savedResponses', JSON.stringify(this.savedResponses));
+            this.dispatchEvent(
+                new CustomEvent('response-saved', {
+                    bubbles: true,
+                    composed: true,
+                    detail: { response: currentResponse },
+                })
+            );
             this.requestUpdate();
         }
     }
@@ -638,6 +671,8 @@ export class AssistantView extends LitElement {
                         <path d="M9 3V8H15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
                     </svg>
                 </button>
+
+                <span class="shortcut-hint">Save: Cmd/Ctrl+Shift+S</span>
 
                 <input type="text" id="textInput" placeholder="Type a message to the AI..." @keydown=${this.handleTextKeydown} />
 
