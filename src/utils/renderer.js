@@ -161,10 +161,32 @@ async function initializeGemini(profile = 'interview', language = 'en-US') {
     }
 }
 
+function shouldUseNativeMacOSMicTranscription(audioMode) {
+    return isMacOS && localStorage.getItem('useNativeMacOSMicTranscription') === 'true' && (audioMode === 'mic_only' || audioMode === 'both');
+}
+
 // Listen for status updates
 ipcRenderer.on('update-status', (event, status) => {
     console.log('Status update:', status);
     cheddar.setStatus(status);
+});
+
+ipcRenderer.on('native-mic-transcription-log', (event, payload) => {
+    if (payload.type === 'partial' || payload.type === 'final') {
+        console.log(`[Native mic transcription][${payload.type}] ${payload.text}`);
+        return;
+    }
+
+    if (payload.type === 'status') {
+        console.log(`[Native mic transcription][status] ${payload.message}`);
+        return;
+    }
+
+    if (payload.type === 'error') {
+        console.error(
+            `[Native mic transcription][error] ${payload.message}${payload.details ? `: ${payload.details}` : ''}`
+        );
+    }
 });
 
 // Listen for responses - REMOVED: This is handled in CheatingDaddyApp.js to avoid duplicates
@@ -183,16 +205,22 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
     console.log('🎯 Token tracker reset for new capture session');
 
     const audioMode = localStorage.getItem('audioMode') || 'speaker_only';
+    const nativeMacOSMicTranscription = shouldUseNativeMacOSMicTranscription(audioMode);
 
     try {
         if (isMacOS) {
             // On macOS, use SystemAudioDump for audio and getDisplayMedia for screen
-            console.log('Starting macOS capture with SystemAudioDump...');
+            const shouldCaptureSystemAudio = audioMode === 'speaker_only' || audioMode === 'both';
+            if (shouldCaptureSystemAudio) {
+                console.log('Starting macOS capture with SystemAudioDump...');
 
-            // Start macOS audio capture
-            const audioResult = await ipcRenderer.invoke('start-macos-audio');
-            if (!audioResult.success) {
-                throw new Error('Failed to start macOS audio capture: ' + audioResult.error);
+                // Start macOS audio capture
+                const audioResult = await ipcRenderer.invoke('start-macos-audio');
+                if (!audioResult.success) {
+                    throw new Error('Failed to start macOS audio capture: ' + audioResult.error);
+                }
+            } else {
+                console.log('Skipping SystemAudioDump because audio mode is microphone-only');
             }
 
             // Get screen capture for screenshots
@@ -205,25 +233,35 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
                 audio: false, // Don't use browser audio on macOS
             });
 
-            console.log('macOS screen capture started - audio handled by SystemAudioDump');
+            console.log(
+                `macOS screen capture started - system audio ${shouldCaptureSystemAudio ? 'enabled via SystemAudioDump' : 'disabled'}`
+            );
 
             if (audioMode === 'mic_only' || audioMode === 'both') {
-                let micStream = null;
-                try {
-                    micStream = await navigator.mediaDevices.getUserMedia({
-                        audio: {
-                            sampleRate: SAMPLE_RATE,
-                            channelCount: 1,
-                            echoCancellation: true,
-                            noiseSuppression: true,
-                            autoGainControl: true,
-                        },
-                        video: false,
-                    });
-                    console.log('macOS microphone capture started');
-                    setupLinuxMicProcessing(micStream);
-                } catch (micError) {
-                    console.warn('Failed to get microphone access on macOS:', micError);
+                if (nativeMacOSMicTranscription) {
+                    const result = await ipcRenderer.invoke('start-native-macos-mic-transcription', localStorage.getItem('selectedLanguage') || 'en-US');
+                    if (!result.success) {
+                        throw new Error('Failed to start native macOS mic transcription: ' + result.error);
+                    }
+                    console.log('macOS native microphone transcription started');
+                } else {
+                    let micStream = null;
+                    try {
+                        micStream = await navigator.mediaDevices.getUserMedia({
+                            audio: {
+                                sampleRate: SAMPLE_RATE,
+                                channelCount: 1,
+                                echoCancellation: true,
+                                noiseSuppression: true,
+                                autoGainControl: true,
+                            },
+                            video: false,
+                        });
+                        console.log('macOS microphone capture started');
+                        setupLinuxMicProcessing(micStream);
+                    } catch (micError) {
+                        console.warn('Failed to get microphone access on macOS:', micError);
+                    }
                 }
             }
         } else if (isLinux) {
@@ -642,6 +680,9 @@ function stopCapture() {
     if (isMacOS) {
         ipcRenderer.invoke('stop-macos-audio').catch(err => {
             console.error('Error stopping macOS audio:', err);
+        });
+        ipcRenderer.invoke('stop-native-macos-mic-transcription').catch(err => {
+            console.error('Error stopping native macOS mic transcription:', err);
         });
     }
 

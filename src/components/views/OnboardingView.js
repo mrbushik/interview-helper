@@ -462,7 +462,7 @@ export class OnboardingView extends LitElement {
             {
                 icon: 'assets/onboarding/ready.svg',
                 title: 'Ready to Go',
-                content: 'Add your Gemini API key in settings and start getting AI-powered assistance in real-time.',
+                content: 'Add your Gemini API key in settings and optionally enable native macOS microphone transcription for local speech-to-text.',
             },
         ];
 

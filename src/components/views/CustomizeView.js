@@ -449,6 +449,7 @@ export class CustomizeView extends LitElement {
         this.loadAdvancedModeSettings();
         this.loadBackgroundTransparency();
         this.loadFontSize();
+        this.loadNativeMacOSMicTranscriptionSettings();
     }
 
     connectedCallback() {
@@ -862,6 +863,17 @@ export class CustomizeView extends LitElement {
         root.style.setProperty('--response-font-size', `${this.fontSize}px`);
     }
 
+    loadNativeMacOSMicTranscriptionSettings() {
+        if (localStorage.getItem('useNativeMacOSMicTranscription') === null) {
+            localStorage.setItem('useNativeMacOSMicTranscription', 'false');
+        }
+    }
+
+    handleNativeMacOSMicTranscriptionChange(e) {
+        localStorage.setItem('useNativeMacOSMicTranscription', e.target.checked ? 'true' : 'false');
+        this.requestUpdate();
+    }
+
     render() {
         const profiles = this.getProfiles();
         const languages = this.getLanguages();
@@ -932,6 +944,25 @@ export class CustomizeView extends LitElement {
                                 Choose which audio sources to capture for the AI.
                             </div>
                         </div>
+                        ${cheddar.isMacOS
+                            ? html`
+                                  <div class="form-group">
+                                      <label class="form-label">Native Mic Transcription</label>
+                                      <div class="checkbox-group">
+                                          <input
+                                              class="checkbox-input"
+                                              type="checkbox"
+                                              .checked=${localStorage.getItem('useNativeMacOSMicTranscription') === 'true'}
+                                              @change=${this.handleNativeMacOSMicTranscriptionChange}
+                                          />
+                                          <label class="checkbox-label">Use macOS Speech framework for microphone transcription</label>
+                                      </div>
+                                      <div class="form-description">
+                                          Uses the Mac speech engine for live microphone transcription and logs partial/final text in the terminal.
+                                      </div>
+                                  </div>
+                              `
+                            : ''}
                     </div>
                 </div>
 

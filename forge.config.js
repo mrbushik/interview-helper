@@ -4,12 +4,13 @@ const { FuseV1Options, FuseVersion } = require('@electron/fuses');
 module.exports = {
     packagerConfig: {
         asar: true,
-        extraResource: ['./src/assets/SystemAudioDump'],
+        extraResource: ['./src/assets/SystemAudioDump', './src/native/MacOSMicTranscriber.swift'],
         name: 'Cheating Daddy',
         icon: 'src/assets/logo',
         extendInfo: {
             NSMicrophoneUsageDescription: 'Cheating Daddy needs microphone access to capture audio during sessions.',
             NSAudioCaptureUsageDescription: 'Cheating Daddy needs audio capture access to analyze system sound during sessions.',
+            NSSpeechRecognitionUsageDescription: 'Cheating Daddy needs speech recognition access to transcribe microphone audio during sessions.',
         },
         // use `security find-identity -v -p codesigning` to find your identity
         // for macos signing

@@ -403,6 +403,7 @@ export class HelpView extends LitElement {
                     <div class="usage-steps">
                         <div class="usage-step"><strong>Start a Session:</strong> Enter your Gemini API key and click "Start Session"</div>
                         <div class="usage-step"><strong>Customize:</strong> Choose your profile and language in the settings</div>
+                        <div class="usage-step"><strong>macOS Mic Mode:</strong> Enable native mic transcription in settings if you want local microphone speech recognition</div>
                         <div class="usage-step">
                             <strong>Position Window:</strong> Use keyboard shortcuts to move the window to your desired location
                         </div>

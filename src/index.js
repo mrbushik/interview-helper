@@ -8,6 +8,7 @@ const { setupGeminiIpcHandlers, stopMacOSAudioCapture, sendToRenderer } = requir
 const { initializeRandomProcessNames } = require('./utils/processRandomizer');
 const { applyAntiAnalysisMeasures } = require('./utils/stealthFeatures');
 const { getLocalConfig, writeConfig } = require('./config');
+const { stopNativeMacOSMicTranscription } = require('./utils/nativeMacOSMicTranscription');
 
 const geminiSessionRef = { current: null };
 let mainWindow = null;
@@ -32,6 +33,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
     stopMacOSAudioCapture();
+    stopNativeMacOSMicTranscription();
     if (process.platform !== 'darwin') {
         app.quit();
     }
@@ -39,6 +41,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
     stopMacOSAudioCapture();
+    stopNativeMacOSMicTranscription();
 });
 
 app.on('activate', () => {

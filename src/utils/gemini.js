@@ -3,12 +3,75 @@ const { BrowserWindow, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
+const {
+    setupNativeMacOSMicTranscriptionIpcHandlers,
+    stopNativeMacOSMicTranscription,
+    isNativeMacOSMicTranscriptionEnabled,
+} = require('./nativeMacOSMicTranscription');
 
 // Conversation tracking variables
 let currentSessionId = null;
 let currentTranscription = '';
 let conversationHistory = [];
 let isInitializingSession = false;
+let rawMessageBuffer = '';
+
+const INTERNAL_REASONING_PARAGRAPH_PATTERNS = [
+    /^(considering|analyzing|refining|prioritizing|synthesizing|formulating|addressing)\b/i,
+    /^i('?m| am) (now )?(focusing|analyzing|refining|prioritizing|synthesizing|formulating)\b/i,
+    /^(my (thought process|latest focus|goal|next step|response))/i,
+];
+
+const INTERNAL_REASONING_SNIPPETS = [
+    'thought process',
+    'internal monologue',
+    'teleprompter response',
+    'ready to deploy',
+    'i need to',
+    'i will focus on',
+    'i am now focusing',
+    "i'm now focusing",
+    'i am now zeroing in',
+    "i'm now zeroing in",
+    'based on their russian speech',
+    'the user context confirms',
+    'i believe my response',
+];
+
+function isInternalReasoningParagraph(paragraph) {
+    const normalized = paragraph.trim();
+    if (!normalized) {
+        return false;
+    }
+
+    if (INTERNAL_REASONING_PARAGRAPH_PATTERNS.some(pattern => pattern.test(normalized))) {
+        return true;
+    }
+
+    const lower = normalized.toLowerCase();
+    return INTERNAL_REASONING_SNIPPETS.some(snippet => lower.includes(snippet));
+}
+
+function sanitizeAssistantResponse(text) {
+    const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+    if (!normalized) {
+        return '';
+    }
+
+    const paragraphs = normalized
+        .split(/\n\s*\n/)
+        .map(paragraph => paragraph.trim())
+        .filter(Boolean);
+
+    const filteredParagraphs = paragraphs.filter(paragraph => !isInternalReasoningParagraph(paragraph));
+
+    const cleaned = (filteredParagraphs.length > 0 ? filteredParagraphs : paragraphs)
+        .join('\n\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+    return cleaned;
+}
 
 function formatSpeakerResults(results) {
     let text = '';
@@ -163,6 +226,35 @@ async function getStoredSetting(key, defaultValue) {
     return defaultValue;
 }
 
+async function handleNativeMicTranscript(payload) {
+    const transcript = typeof payload === 'string' ? payload : payload?.text;
+    if (!transcript) {
+        return;
+    }
+
+    const transcriptLine = `[Candidate]: ${transcript}`;
+    currentTranscription += `${transcriptLine}\n`;
+
+    console.log(
+        `[Native mic transcription -> Gemini][${typeof payload === 'string' ? 'final' : payload.type || 'unknown'}]`,
+        transcriptLine
+    );
+
+    if (!global.geminiSessionRef?.current) {
+        console.warn('[Native mic transcription] No active Gemini session to receive transcript');
+        return;
+    }
+
+    try {
+        await global.geminiSessionRef.current.sendRealtimeInput({
+            text: transcriptLine,
+        });
+        sendToRenderer('update-status', 'Native mic transcript forwarded');
+    } catch (error) {
+        console.error('[Native mic transcription] Failed to forward transcript to Gemini:', error);
+    }
+}
+
 async function attemptReconnection() {
     if (!lastSessionParams || reconnectionAttempts >= maxReconnectionAttempts) {
         console.log('Max reconnection attempts reached or no session params stored');
@@ -246,6 +338,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         initializeNewSession();
     }
     messageBuffer = '';
+    rawMessageBuffer = '';
 
     try {
         const session = await client.live.connect({
@@ -255,8 +348,6 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     sendToRenderer('update-status', 'Live session connected');
                 },
                 onmessage: function (message) {
-                    console.log('----------------', message);
-
                     if (message.serverContent?.inputTranscription?.results) {
                         currentTranscription += formatSpeakerResults(message.serverContent.inputTranscription.results);
                     }
@@ -264,20 +355,22 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     // Handle AI model response
                     if (message.serverContent?.modelTurn?.parts) {
                         for (const part of message.serverContent.modelTurn.parts) {
-                            console.log(part);
                             if (part.text) {
-                                messageBuffer += part.text;
+                                rawMessageBuffer += part.text;
+                                messageBuffer = sanitizeAssistantResponse(rawMessageBuffer);
                                 sendToRenderer('update-response', messageBuffer);
                             }
                         }
                     }
 
                     if (message.serverContent?.outputTranscription?.text) {
-                        messageBuffer += message.serverContent.outputTranscription.text;
+                        rawMessageBuffer += message.serverContent.outputTranscription.text;
+                        messageBuffer = sanitizeAssistantResponse(rawMessageBuffer);
                         sendToRenderer('update-response', messageBuffer);
                     }
 
                     if (message.serverContent?.generationComplete) {
+                        messageBuffer = sanitizeAssistantResponse(rawMessageBuffer);
                         sendToRenderer('update-response', messageBuffer);
 
                         // Save conversation turn when we have both transcription and AI response
@@ -287,6 +380,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                         }
 
                         messageBuffer = '';
+                        rawMessageBuffer = '';
                     }
 
                     if (message.serverContent?.turnComplete) {
@@ -534,6 +628,7 @@ function convertStereoToMono(stereoBuffer) {
 
 function stopMacOSAudioCapture() {
     stopRequestedForSystemAudio = true;
+    stopNativeMacOSMicTranscription();
     if (systemAudioRestartTimer) {
         clearTimeout(systemAudioRestartTimer);
         systemAudioRestartTimer = null;
@@ -601,6 +696,7 @@ async function sendAudioToGemini(base64Data, geminiSessionRef) {
 function setupGeminiIpcHandlers(geminiSessionRef) {
     // Store the geminiSessionRef globally for reconnection access
     global.geminiSessionRef = geminiSessionRef;
+    setupNativeMacOSMicTranscriptionIpcHandlers(handleNativeMicTranscript);
 
     ipcMain.handle('initialize-gemini', async (event, apiKey, customPrompt, profile = 'interview', language = 'en-US') => {
         const session = await initializeGeminiSession(apiKey, customPrompt, profile, language);
@@ -627,6 +723,10 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
     // Handle microphone audio on a separate channel
     ipcMain.handle('send-mic-audio-content', async (event, { data, mimeType }) => {
+        if (isNativeMacOSMicTranscriptionEnabled()) {
+            return { success: true, skipped: true, reason: 'native_macos_mic_transcription_active' };
+        }
+
         if (!geminiSessionRef.current) return { success: false, error: 'No active Gemini session' };
         try {
             process.stdout.write(',');
