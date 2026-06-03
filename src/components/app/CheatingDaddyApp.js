@@ -339,14 +339,15 @@ export class CheatingDaddyApp extends LitElement {
 
     // Assistant view event handlers
     async handleSendText(message) {
+        this._awaitingNewResponse = true;
         const result = await window.cheddar.sendTextMessage(message);
 
         if (!result.success) {
+            this._awaitingNewResponse = false;
             console.error('Failed to send message:', result.error);
             this.setStatus('Error sending message: ' + result.error);
         } else {
-            this.setStatus('Message sent...');
-            this._awaitingNewResponse = true;
+            this.setStatus('Ready');
         }
     }
 

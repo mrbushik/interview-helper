@@ -406,6 +406,7 @@ export class CustomizeView extends LitElement {
         layoutMode: { type: String },
         keybinds: { type: Object },
         googleSearchEnabled: { type: Boolean },
+        forceRussianAnswer: { type: Boolean },
         backgroundTransparency: { type: Number },
         fontSize: { type: Number },
         onProfileChange: { type: Function },
@@ -434,6 +435,7 @@ export class CustomizeView extends LitElement {
 
         // Google Search default
         this.googleSearchEnabled = true;
+        this.forceRussianAnswer = localStorage.getItem('forceRussianAnswer') === 'true';
 
         // Advanced mode default
         this.advancedMode = false;
@@ -446,6 +448,7 @@ export class CustomizeView extends LitElement {
 
         this.loadKeybinds();
         this.loadGoogleSearchSettings();
+        this.loadForceRussianAnswerSettings();
         this.loadAdvancedModeSettings();
         this.loadBackgroundTransparency();
         this.loadFontSize();
@@ -776,6 +779,19 @@ export class CustomizeView extends LitElement {
         }
     }
 
+    loadForceRussianAnswerSettings() {
+        const forceRussianAnswer = localStorage.getItem('forceRussianAnswer');
+        if (forceRussianAnswer !== null) {
+            this.forceRussianAnswer = forceRussianAnswer === 'true';
+        }
+    }
+
+    handleForceRussianAnswerChange(e) {
+        this.forceRussianAnswer = e.target.checked;
+        localStorage.setItem('forceRussianAnswer', this.forceRussianAnswer ? 'true' : 'false');
+        this.requestUpdate();
+    }
+
     async handleGoogleSearchChange(e) {
         this.googleSearchEnabled = e.target.checked;
         localStorage.setItem('googleSearchEnabled', this.googleSearchEnabled.toString());
@@ -1013,7 +1029,22 @@ export class CustomizeView extends LitElement {
                                         `
                                     )}
                                 </select>
-                                <div class="form-description">Language for speech recognition and AI responses</div>
+                                <div class="form-description">Language for speech recognition. The answer language can be forced below.</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Answer Language</label>
+                                <div class="checkbox-group">
+                                    <input
+                                        class="checkbox-input"
+                                        type="checkbox"
+                                        .checked=${this.forceRussianAnswer}
+                                        @change=${this.handleForceRussianAnswerChange}
+                                    />
+                                    <label class="checkbox-label">Always answer in Russian</label>
+                                </div>
+                                <div class="form-description">
+                                    Keeps recognized speech language unchanged, but asks Gemini to return all answers in Russian with English technical terms preserved.
+                                </div>
                             </div>
                         </div>
                     </div>

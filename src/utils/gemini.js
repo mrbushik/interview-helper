@@ -15,6 +15,14 @@ let currentTranscription = '';
 let conversationHistory = [];
 let isInitializingSession = false;
 let rawMessageBuffer = '';
+let geminiTextClient = null;
+let geminiTextSystemPrompt = '';
+let geminiTextTools = [];
+let activeTextGenerationId = 0;
+let lastSubmittedText = '';
+let lastSubmittedTextAt = 0;
+
+const DEFAULT_GEMINI_TEXT_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash-001'];
 
 const INTERNAL_REASONING_PARAGRAPH_PATTERNS = [
     /^(considering|analyzing|refining|prioritizing|synthesizing|formulating|addressing)\b/i,
@@ -71,6 +79,214 @@ function sanitizeAssistantResponse(text) {
         .trim();
 
     return cleaned;
+}
+
+const TRANSCRIPT_CORRECTIONS = [
+    [/\bреакт(?:е|а|ом)?\b/gi, 'React'],
+    [/\bреакц(?:ия|ии|ию|ией)\b/gi, 'React'],
+    [/\bриакт\b/gi, 'React'],
+    [/\bджав[ао]скрипт\b/gi, 'JavaScript'],
+    [/\bтайпскрипт\b/gi, 'TypeScript'],
+    [/\bнод(?:а|е|ой)?\.?\s*джи\s*эс\b/gi, 'Node.js'],
+    [/\bнода\b/gi, 'Node.js'],
+    [/\bивент\s*луп\b/gi, 'event loop'],
+    [/\bevent\s*loop\b/gi, 'event loop'],
+    [/\bфсд\b/gi, 'FSD'],
+    [/\bэф\s*эс\s*ди\b/gi, 'FSD'],
+    [/\bредакс\b/gi, 'Redux'],
+    [/\bредукс\b/gi, 'Redux'],
+    [/\bхуки\b/gi, 'hooks'],
+    [/\bпропсы\b/gi, 'props'],
+    [/\bстейт\b/gi, 'state'],
+    [/\bрендеринг\b/gi, 'rendering'],
+    [/\brende+r+\b/gi, 'render'],
+    [/\bрендер(?:а|е|ом)?\b/gi, 'render'],
+    [/\bреконсиляц(?:ия|ии|ию|ией)\b/gi, 'reconciliation'],
+    [/\bмемоизац(?:ия|ии|ию|ией)\b/gi, 'memoization'],
+    [/\bюз\s*мемо\b/gi, 'useMemo'],
+    [/\bюз\s*колл?бэк\b/gi, 'useCallback'],
+    [/\bюз\s*эффект\b/gi, 'useEffect'],
+    [/\bви\s*дом\b/gi, 'VDOM'],
+    [/\bвиртуальн(?:ый|ого|ом)\s+дом\b/gi, 'virtual DOM'],
+];
+
+const GOOGLE_SEARCH_TRIGGER_PATTERNS = [
+    /\b(latest|recent|current|today|yesterday|news|funding|acquisition|pricing|price|stock|release|version)\b/i,
+    /\b(company|startup|market|competitor|leadership|ceo|cto|trend|report)\b/i,
+    /\b(последн|свеж|актуальн|сегодня|вчера|новост|финансирован|инвестиц|покупк|поглощен|цен[аы]|стоимост)\b/i,
+    /\b(компани|рынок|конкурент|руководител|директор|тренд|отчет|релиз|верси[яи])\b/i,
+];
+
+function normalizeTranscriptForModel(text) {
+    let normalized = String(text || '').trim();
+    for (const [pattern, replacement] of TRANSCRIPT_CORRECTIONS) {
+        normalized = normalized.replace(pattern, replacement);
+    }
+    return normalized.replace(/\s{2,}/g, ' ').trim();
+}
+
+function getRecentConversationContext() {
+    return conversationHistory
+        .slice(-6)
+        .map((turn, index) => {
+            return `Turn ${index + 1}\nQuestion:\n${turn.transcription}\nAnswer:\n${turn.ai_response}`;
+        })
+        .join('\n\n');
+}
+
+function containsCyrillic(text) {
+    return /[А-Яа-яЁё]/.test(text);
+}
+
+function buildTextGenerationPrompt(question, source = 'text', options = {}) {
+    const recentContext = getRecentConversationContext();
+    const sections = [];
+
+    if (recentContext) {
+        sections.push(`Recent interview context:\n${recentContext}`);
+    }
+
+    sections.push(`Current input source: ${source}`);
+    sections.push(`Current question:\n${question}`);
+
+    if (options.forceRussianAnswer || containsCyrillic(question)) {
+        sections.push(
+            'Language rule for this answer: answer in Russian. Do not ask for an English rephrase. Keep common technical terms in English when appropriate.'
+        );
+    }
+
+    sections.push('Return the final answer only.');
+
+    return sections.join('\n\n');
+}
+
+function shouldUseGoogleSearchForText(question) {
+    if (!geminiTextTools.length) {
+        return false;
+    }
+
+    return GOOGLE_SEARCH_TRIGGER_PATTERNS.some(pattern => pattern.test(question));
+}
+
+async function getGeminiTextModelCandidates() {
+    const storedModel = (await getStoredSetting('geminiTextModel', '')).trim();
+    const models = storedModel ? [storedModel, ...DEFAULT_GEMINI_TEXT_MODELS] : DEFAULT_GEMINI_TEXT_MODELS;
+    return [...new Set(models.filter(Boolean))];
+}
+
+function isRetryableTextModelError(error) {
+    const text = `${error?.message || ''} ${error?.status || ''} ${error?.code || ''}`.toLowerCase();
+    return (
+        text.includes('429') ||
+        text.includes('too many requests') ||
+        text.includes('resource_exhausted') ||
+        text.includes('quota') ||
+        text.includes('not found') ||
+        text.includes('not supported') ||
+        text.includes('model')
+    );
+}
+
+async function generateTextAnswerFromTranscript(transcript, source = 'text') {
+    if (!geminiTextClient) {
+        throw new Error('Gemini text client is not initialized');
+    }
+
+    const normalizedTranscript = normalizeTranscriptForModel(transcript);
+    if (!normalizedTranscript) {
+        return { success: false, error: 'Empty transcript' };
+    }
+
+    const now = Date.now();
+    if (normalizedTranscript === lastSubmittedText && now - lastSubmittedTextAt < 2500) {
+        console.log('[Gemini text] Skipping duplicate transcript:', normalizedTranscript);
+        return { success: true, skipped: true, reason: 'duplicate_transcript' };
+    }
+
+    lastSubmittedText = normalizedTranscript;
+    lastSubmittedTextAt = now;
+
+    const generationId = ++activeTextGenerationId;
+    let responseBuffer = '';
+    const transcriptionLine = source === 'native_mic' ? `[Candidate]: ${normalizedTranscript}` : normalizedTranscript;
+
+    currentTranscription = `${transcriptionLine}\n`;
+
+    console.log(`[Gemini text][${source}]`, normalizedTranscript);
+    sendToRenderer('update-status', 'Generating text answer...');
+
+    try {
+        const tools = shouldUseGoogleSearchForText(normalizedTranscript) ? geminiTextTools : [];
+        const forceRussianAnswer = (await getStoredSetting('forceRussianAnswer', 'false')) === 'true';
+        console.log('[Gemini text] Google Search tools for this request:', tools.length > 0);
+
+        const modelCandidates = await getGeminiTextModelCandidates();
+        let stream = null;
+        let lastError = null;
+        let selectedModel = '';
+
+        for (const model of modelCandidates) {
+            try {
+                selectedModel = model;
+                console.log('[Gemini text] Trying model:', model);
+                stream = await geminiTextClient.models.generateContentStream({
+                    model,
+                    contents: buildTextGenerationPrompt(normalizedTranscript, source, { forceRussianAnswer }),
+                    config: {
+                        systemInstruction: geminiTextSystemPrompt,
+                        tools,
+                        temperature: 0.35,
+                        topP: 0.9,
+                        maxOutputTokens: 1200,
+                        responseMimeType: 'text/plain',
+                    },
+                });
+                break;
+            } catch (error) {
+                lastError = error;
+                console.warn(`[Gemini text] Model ${model} failed:`, error.message || error);
+                if (!isRetryableTextModelError(error)) {
+                    throw error;
+                }
+            }
+        }
+
+        if (!stream) {
+            throw lastError || new Error('No Gemini text model candidates available');
+        }
+
+        console.log('[Gemini text] Streaming answer with model:', selectedModel);
+
+        for await (const chunk of stream) {
+            if (generationId !== activeTextGenerationId) {
+                return { success: true, skipped: true, reason: 'superseded' };
+            }
+
+            if (chunk.text) {
+                responseBuffer += chunk.text;
+                sendToRenderer('update-response', sanitizeAssistantResponse(responseBuffer));
+            }
+        }
+
+        if (generationId !== activeTextGenerationId) {
+            return { success: true, skipped: true, reason: 'superseded' };
+        }
+
+        const finalResponse = sanitizeAssistantResponse(responseBuffer);
+        sendToRenderer('update-response', finalResponse);
+        sendToRenderer('update-status', 'Ready');
+
+        if (finalResponse) {
+            saveConversationTurn(currentTranscription, finalResponse);
+            currentTranscription = '';
+        }
+
+        return { success: true, text: finalResponse };
+    } catch (error) {
+        console.error('[Gemini text] Failed to generate answer:', error);
+        sendToRenderer('update-status', 'Error: ' + error.message);
+        return { success: false, error: error.message };
+    }
 }
 
 function formatSpeakerResults(results) {
@@ -232,26 +448,16 @@ async function handleNativeMicTranscript(payload) {
         return;
     }
 
-    const transcriptLine = `[Candidate]: ${transcript}`;
-    currentTranscription += `${transcriptLine}\n`;
-
     console.log(
         `[Native mic transcription -> Gemini][${typeof payload === 'string' ? 'final' : payload.type || 'unknown'}]`,
-        transcriptLine
+        `[Candidate]: ${transcript}`
     );
 
-    if (!global.geminiSessionRef?.current) {
-        console.warn('[Native mic transcription] No active Gemini session to receive transcript');
-        return;
-    }
-
     try {
-        await global.geminiSessionRef.current.sendRealtimeInput({
-            text: transcriptLine,
-        });
-        sendToRenderer('update-status', 'Native mic transcript forwarded');
+        await generateTextAnswerFromTranscript(transcript, 'native_mic');
     } catch (error) {
-        console.error('[Native mic transcription] Failed to forward transcript to Gemini:', error);
+        console.error('[Native mic transcription] Failed to generate text answer:', error);
+        sendToRenderer('update-status', 'Error: ' + error.message);
     }
 }
 
@@ -310,6 +516,8 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     isInitializingSession = true;
     sendToRenderer('session-initializing', true);
 
+    const forceRussianAnswer = (await getStoredSetting('forceRussianAnswer', 'false')) === 'true';
+
     // Store session parameters for reconnection (only if not already reconnecting)
     if (!isReconnection) {
         lastSessionParams = {
@@ -317,6 +525,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
             customPrompt,
             profile,
             language,
+            forceRussianAnswer,
         };
         reconnectionAttempts = 0; // Reset counter for new session
     }
@@ -331,7 +540,19 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     const enabledTools = await getEnabledTools();
     const googleSearchEnabled = enabledTools.some(tool => tool.googleSearch);
 
-    const systemPrompt = getSystemPrompt(profile, customPrompt, googleSearchEnabled);
+    const systemPrompt = getSystemPrompt(profile, customPrompt, googleSearchEnabled, { forceRussianAnswer });
+    geminiTextClient = client;
+    geminiTextTools = enabledTools;
+    geminiTextSystemPrompt = systemPrompt;
+    activeTextGenerationId += 1;
+    lastSubmittedText = '';
+    lastSubmittedTextAt = 0;
+
+    console.log('Gemini text answers enabled:', {
+        model: 'gemini-2.0-flash-001',
+        forceRussianAnswer,
+        googleSearchEnabled,
+    });
 
     // Initialize new conversation session (only if not reconnecting)
     if (!isReconnection) {
@@ -769,16 +990,13 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     });
 
     ipcMain.handle('send-text-message', async (event, text) => {
-        if (!geminiSessionRef.current) return { success: false, error: 'No active Gemini session' };
-
         try {
             if (!text || typeof text !== 'string' || text.trim().length === 0) {
                 return { success: false, error: 'Invalid text message' };
             }
 
             console.log('Sending text message:', text);
-            await geminiSessionRef.current.sendRealtimeInput({ text: text.trim() });
-            return { success: true };
+            return await generateTextAnswerFromTranscript(text.trim(), 'manual_text');
         } catch (error) {
             console.error('Error sending text:', error);
             return { success: false, error: error.message };
@@ -818,6 +1036,12 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
             // Clear session params to prevent reconnection when user closes session
             lastSessionParams = null;
+            geminiTextClient = null;
+            geminiTextSystemPrompt = '';
+            geminiTextTools = [];
+            activeTextGenerationId += 1;
+            lastSubmittedText = '';
+            lastSubmittedTextAt = 0;
 
             // Cleanup any pending resources and stop audio/video capture
             if (geminiSessionRef.current) {

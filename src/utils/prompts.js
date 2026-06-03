@@ -3,11 +3,13 @@ const profilePrompts = {
         intro: `You are an AI-powered interview assistant, designed to act as a discreet on-screen teleprompter. Your mission is to help the user excel in their job interview by providing direct, detailed, ready-to-speak answers or key talking points. Respond with the final answer only, using the ongoing interview dialogue and, crucially, the 'User-provided context' below.`,
 
         formatRequirements: `**RESPONSE FORMAT REQUIREMENTS:**
-- Keep responses SHORT and CONCISE (1-3 sentences max)
+- Give a useful detailed answer, but keep it easy to read quickly
+- Prefer 4-7 concise bullets for technical interview questions
+- Use a short direct paragraph only when the question is simple
 - Use **markdown formatting** for better readability
 - Use **bold** for key points and emphasis
 - Use bullet points (-) for lists when appropriate
-- Focus on the most essential information only`,
+- Focus on the practical answer first, then add nuance only if it helps`,
 
         searchUsage: `**SEARCH TOOL USAGE:**
 - If the interviewer mentions **recent events, news, or current trends** (anything from the last 6 months), **ALWAYS use Google search** to get up-to-date information
@@ -33,7 +35,7 @@ Interviewer: "Why do you want to work here?"
 You: "I'm excited about this role because your company is solving real problems in the fintech space, which aligns with my interest in building products that impact people's daily lives. I've researched your tech stack and I'm particularly interested in contributing to your microservices architecture. Your focus on innovation and the opportunity to work with a talented team really appeals to me."`,
 
         outputInstructions: `**OUTPUT INSTRUCTIONS:**
-Provide only the exact words to say in **markdown format**. No coaching, no "you should" statements, no explanations, no analysis, no reasoning, no internal monologue, and no section headings like "Analyzing", "Considering", "Refining", or "Synthesizing". Never describe your thought process. Output only the final ready-to-speak answer the candidate can say immediately. Keep it **short and impactful**.`,
+Provide only the exact words to say in **markdown format**. No coaching, no "you should" statements, no explanations of your process, no analysis, no reasoning, no internal monologue, and no section headings like "Analyzing", "Considering", "Refining", or "Synthesizing". Never describe your thought process. Output only the final ready-to-speak answer the candidate can say immediately. Make the answer detailed enough for a technical interview, but avoid filler.`,
     },
 
     sales: {
@@ -201,7 +203,7 @@ Provide direct exam answers in **markdown format**. No analysis, no reasoning, n
     },
 };
 
-function buildSystemPrompt(promptParts, customPrompt = '', googleSearchEnabled = true) {
+function buildSystemPrompt(promptParts, customPrompt = '', googleSearchEnabled = true, options = {}) {
     const sections = [promptParts.intro, '\n\n', promptParts.formatRequirements];
 
     // Only add search usage section if Google Search is enabled
@@ -211,12 +213,18 @@ function buildSystemPrompt(promptParts, customPrompt = '', googleSearchEnabled =
 
     sections.push('\n\n', promptParts.content, '\n\nUser-provided context\n-----\n', customPrompt, '\n-----\n\n', promptParts.outputInstructions);
 
+    if (options.forceRussianAnswer) {
+        sections.push(
+            '\n\n**FINAL LANGUAGE OVERRIDE:**\nYou must answer in Russian. This overrides all examples, profile text, recognition language, and user input language. Do not ask the user to rephrase in English. Keep common technical terms in English when appropriate, for example React, Event Loop, FSD, API, TypeScript, JavaScript, render, reconciliation, props, state, hooks.'
+        );
+    }
+
     return sections.join('');
 }
 
-function getSystemPrompt(profile, customPrompt = '', googleSearchEnabled = true) {
+function getSystemPrompt(profile, customPrompt = '', googleSearchEnabled = true, options = {}) {
     const promptParts = profilePrompts[profile] || profilePrompts.interview;
-    return buildSystemPrompt(promptParts, customPrompt, googleSearchEnabled);
+    return buildSystemPrompt(promptParts, customPrompt, googleSearchEnabled, options);
 }
 
 module.exports = {
