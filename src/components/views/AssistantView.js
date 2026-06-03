@@ -290,6 +290,26 @@ export class AssistantView extends LitElement {
             stroke: currentColor !important;
         }
 
+        .listen-toggle-button {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-color);
+            border: 1px solid var(--button-border);
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
+        .listen-toggle-button:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .listen-toggle-button.paused {
+            border-color: rgba(245, 158, 11, 0.45);
+            color: #fbbf24;
+        }
+
         .shortcut-hint {
             font-size: 11px;
             color: var(--description-color);
@@ -303,7 +323,9 @@ export class AssistantView extends LitElement {
         responses: { type: Array },
         currentResponseIndex: { type: Number },
         selectedProfile: { type: String },
+        isListening: { type: Boolean },
         onSendText: { type: Function },
+        onToggleListening: { type: Function },
         shouldAnimateResponse: { type: Boolean },
         savedResponses: { type: Array },
     };
@@ -313,8 +335,11 @@ export class AssistantView extends LitElement {
         this.responses = [];
         this.currentResponseIndex = -1;
         this.selectedProfile = 'interview';
+        this.isListening = false;
         this.onSendText = () => {};
+        this.onToggleListening = () => {};
         this._lastAnimatedWordCount = 0;
+        this._animatedResponseIndexes = new Set();
         this.boundSaveShortcutHandler = null;
         // Load saved responses from localStorage
         try {
@@ -398,6 +423,7 @@ export class AssistantView extends LitElement {
 
     navigateToPreviousResponse() {
         if (this.currentResponseIndex > 0) {
+            this._animatedResponseIndexes.add(this.currentResponseIndex);
             this.currentResponseIndex--;
             this.dispatchEvent(
                 new CustomEvent('response-index-changed', {
@@ -410,6 +436,7 @@ export class AssistantView extends LitElement {
 
     navigateToNextResponse() {
         if (this.currentResponseIndex < this.responses.length - 1) {
+            this._animatedResponseIndexes.add(this.currentResponseIndex);
             this.currentResponseIndex++;
             this.dispatchEvent(
                 new CustomEvent('response-index-changed', {
@@ -585,6 +612,9 @@ export class AssistantView extends LitElement {
             if (changedProperties.has('currentResponseIndex')) {
                 this._lastAnimatedWordCount = 0;
             }
+            if (changedProperties.has('responses') && this.responses.length === 0) {
+                this._animatedResponseIndexes.clear();
+            }
             this.updateResponseContent();
         }
     }
@@ -599,7 +629,12 @@ export class AssistantView extends LitElement {
             console.log('Rendered response:', renderedResponse);
             container.innerHTML = renderedResponse;
             const words = container.querySelectorAll('[data-word]');
-            if (this.shouldAnimateResponse) {
+            const isCurrentStreamingResponse =
+                this.shouldAnimateResponse &&
+                this.currentResponseIndex === this.responses.length - 1 &&
+                !this._animatedResponseIndexes.has(this.currentResponseIndex);
+
+            if (isCurrentStreamingResponse) {
                 for (let i = 0; i < this._lastAnimatedWordCount && i < words.length; i++) {
                     words[i].classList.add('visible');
                 }
@@ -608,6 +643,7 @@ export class AssistantView extends LitElement {
                     setTimeout(() => {
                         words[i].classList.add('visible');
                         if (i === words.length - 1) {
+                            this._animatedResponseIndexes.add(this.currentResponseIndex);
                             this.dispatchEvent(new CustomEvent('response-animation-complete', { bubbles: true, composed: true }));
                         }
                     }, (i - this._lastAnimatedWordCount) * 100);
@@ -616,6 +652,9 @@ export class AssistantView extends LitElement {
             } else {
                 words.forEach(word => word.classList.add('visible'));
                 this._lastAnimatedWordCount = words.length;
+                if (this.currentResponseIndex >= 0) {
+                    this._animatedResponseIndexes.add(this.currentResponseIndex);
+                }
             }
         } else {
             console.log('Response container not found');
@@ -673,6 +712,14 @@ export class AssistantView extends LitElement {
                 </button>
 
                 <span class="shortcut-hint">Save: Cmd/Ctrl+Shift+S</span>
+
+                <button
+                    class="listen-toggle-button ${this.isListening ? '' : 'paused'}"
+                    @click=${this.onToggleListening}
+                    title=${this.isListening ? 'Pause capture' : 'Resume capture'}
+                >
+                    ${this.isListening ? 'Pause Listening' : 'Resume Listening'}
+                </button>
 
                 <input type="text" id="textInput" placeholder="Type a message to the AI..." @keydown=${this.handleTextKeydown} />
 

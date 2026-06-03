@@ -104,6 +104,7 @@ export class CheatingDaddyApp extends LitElement {
         sessionActive: { type: Boolean },
         selectedProfile: { type: String },
         selectedLanguage: { type: String },
+        isListening: { type: Boolean },
         responses: { type: Array },
         currentResponseIndex: { type: Number },
         selectedScreenshotInterval: { type: String },
@@ -125,6 +126,7 @@ export class CheatingDaddyApp extends LitElement {
         this.sessionActive = false;
         this.selectedProfile = localStorage.getItem('selectedProfile') || 'interview';
         this.selectedLanguage = localStorage.getItem('selectedLanguage') || 'en-US';
+        this.isListening = false;
         this.selectedScreenshotInterval = localStorage.getItem('selectedScreenshotInterval') || '5';
         this.selectedImageQuality = localStorage.getItem('selectedImageQuality') || 'medium';
         this.layoutMode = localStorage.getItem('layoutMode') || 'normal';
@@ -245,6 +247,7 @@ export class CheatingDaddyApp extends LitElement {
                 await ipcRenderer.invoke('close-session');
             }
             this.sessionActive = false;
+            this.isListening = false;
             this.currentView = 'main';
             console.log('Session closed');
         } else {
@@ -279,6 +282,8 @@ export class CheatingDaddyApp extends LitElement {
         await cheddar.initializeGemini(this.selectedProfile, this.selectedLanguage);
         // Pass the screenshot interval as string (including 'manual' option)
         cheddar.startCapture(this.selectedScreenshotInterval, this.selectedImageQuality);
+        this.sessionActive = true;
+        this.isListening = true;
         this.responses = [];
         this.currentResponseIndex = -1;
         this.startTime = Date.now();
@@ -349,6 +354,23 @@ export class CheatingDaddyApp extends LitElement {
         } else {
             this.setStatus('Ready');
         }
+    }
+
+    async handleToggleListening() {
+        if (!this.sessionActive) {
+            return;
+        }
+
+        if (this.isListening) {
+            cheddar.stopCapture();
+            this.isListening = false;
+            this.setStatus('Paused');
+            return;
+        }
+
+        await cheddar.startCapture(this.selectedScreenshotInterval, this.selectedImageQuality);
+        this.isListening = true;
+        this.setStatus('Listening...');
     }
 
     handleResponseIndexChanged(e) {
@@ -461,7 +483,9 @@ export class CheatingDaddyApp extends LitElement {
                         .responses=${this.responses}
                         .currentResponseIndex=${this.currentResponseIndex}
                         .selectedProfile=${this.selectedProfile}
+                        .isListening=${this.isListening}
                         .onSendText=${message => this.handleSendText(message)}
+                        .onToggleListening=${() => this.handleToggleListening()}
                         .shouldAnimateResponse=${this.shouldAnimateResponse}
                         @response-index-changed=${this.handleResponseIndexChanged}
                         @response-saved=${e => this.handleResponseSaved(e)}

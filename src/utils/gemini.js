@@ -117,6 +117,15 @@ const GOOGLE_SEARCH_TRIGGER_PATTERNS = [
     /\b(компани|рынок|конкурент|руководител|директор|тренд|отчет|релиз|верси[яи])\b/i,
 ];
 
+const RUSSIAN_ANSWER_OVERRIDE = [
+    'CRITICAL LANGUAGE RULE:',
+    'Answer in Russian only.',
+    'This overrides the selected interview language, speech recognition language, examples, and any earlier instruction.',
+    'Do not say that you can only respond in English.',
+    'Do not ask the user to rephrase in English.',
+    'Keep common technical terms in English when appropriate, for example React, Event Loop, FSD, API, TypeScript, JavaScript, render, reconciliation, props, state, hooks.',
+].join('\n');
+
 function normalizeTranscriptForModel(text) {
     let normalized = String(text || '').trim();
     for (const [pattern, replacement] of TRANSCRIPT_CORRECTIONS) {
@@ -150,14 +159,20 @@ function buildTextGenerationPrompt(question, source = 'text', options = {}) {
     sections.push(`Current question:\n${question}`);
 
     if (options.forceRussianAnswer || containsCyrillic(question)) {
-        sections.push(
-            'Language rule for this answer: answer in Russian. Do not ask for an English rephrase. Keep common technical terms in English when appropriate.'
-        );
+        sections.push(RUSSIAN_ANSWER_OVERRIDE);
     }
 
     sections.push('Return the final answer only.');
 
     return sections.join('\n\n');
+}
+
+function buildEffectiveTextSystemInstruction(forceRussianAnswer) {
+    if (!forceRussianAnswer) {
+        return geminiTextSystemPrompt;
+    }
+
+    return `${geminiTextSystemPrompt}\n\n${RUSSIAN_ANSWER_OVERRIDE}`;
 }
 
 function shouldUseGoogleSearchForText(question) {
@@ -219,6 +234,7 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
         const tools = shouldUseGoogleSearchForText(normalizedTranscript) ? geminiTextTools : [];
         const forceRussianAnswer = (await getStoredSetting('forceRussianAnswer', 'false')) === 'true';
         console.log('[Gemini text] Google Search tools for this request:', tools.length > 0);
+        console.log('[Gemini text] Force Russian answer:', forceRussianAnswer);
 
         const modelCandidates = await getGeminiTextModelCandidates();
         let stream = null;
@@ -233,7 +249,7 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
                     model,
                     contents: buildTextGenerationPrompt(normalizedTranscript, source, { forceRussianAnswer }),
                     config: {
-                        systemInstruction: geminiTextSystemPrompt,
+                        systemInstruction: buildEffectiveTextSystemInstruction(forceRussianAnswer),
                         tools,
                         temperature: 0.35,
                         topP: 0.9,
