@@ -430,6 +430,10 @@ export class HelpView extends LitElement {
                             <div class="profile-description">Get help with interview questions and responses</div>
                         </div>
                         <div class="profile-item">
+                            <div class="profile-name">HR / Behavioral</div>
+                            <div class="profile-description">STAR-style answers for HR, culture-fit, and behavioral questions</div>
+                        </div>
+                        <div class="profile-item">
                             <div class="profile-name">Sales Call</div>
                             <div class="profile-description">Assistance with sales conversations and objection handling</div>
                         </div>

@@ -471,6 +471,11 @@ export class CustomizeView extends LitElement {
                 description: 'Get help with answering interview questions',
             },
             {
+                value: 'behavioral',
+                name: 'HR / Behavioral',
+                description: 'STAR-style answers for HR, culture-fit, and behavioral interview questions',
+            },
+            {
                 value: 'sales',
                 name: 'Sales Call',
                 description: 'Assist with sales conversations and objection handling',
@@ -536,6 +541,7 @@ export class CustomizeView extends LitElement {
     getProfileNames() {
         return {
             interview: 'Job Interview',
+            behavioral: 'HR / Behavioral',
             sales: 'Sales Call',
             meeting: 'Business Meeting',
             presentation: 'Presentation',
@@ -575,6 +581,13 @@ export class CustomizeView extends LitElement {
 
     handleCustomPromptInput(e) {
         localStorage.setItem('customPrompt', e.target.value);
+    }
+
+    handleInterviewContextInput(e) {
+        const key = e.target.dataset.contextKey;
+        if (key) {
+            localStorage.setItem(key, e.target.value);
+        }
     }
 
     getDefaultKeybinds() {
@@ -938,10 +951,55 @@ export class CustomizeView extends LitElement {
                             <div class="form-description">
                                 Personalize the AI's behavior with specific instructions that will be added to the
                                 ${profileNames[this.selectedProfile] || 'selected profile'} base prompts
+                            </div>
+                        </div>
+
+                        <div class="form-group full-width">
+                            <label class="form-label">About Me / Experience Context</label>
+                            <textarea
+                                class="form-control"
+                                placeholder="Add your background, stack, projects, achievements, strengths, weak spots, and examples you want the AI to reuse..."
+                                .value=${localStorage.getItem('candidateContext') || ''}
+                                rows="5"
+                                data-context-key="candidateContext"
+                                @input=${this.handleInterviewContextInput}
+                            ></textarea>
+                            <div class="form-description">
+                                Used for personal examples, STAR stories, self-introduction, strengths, weaknesses, and technical experience answers.
+                            </div>
+                        </div>
+
+                        <div class="form-group full-width">
+                            <label class="form-label">Company Context</label>
+                            <textarea
+                                class="form-control"
+                                placeholder="Add company notes, product details, mission, recent news, culture, team, or anything from the recruiter..."
+                                .value=${localStorage.getItem('companyContext') || ''}
+                                rows="4"
+                                data-context-key="companyContext"
+                                @input=${this.handleInterviewContextInput}
+                            ></textarea>
+                            <div class="form-description">
+                                Used for motivation questions like why this company, why this product, and what you know about the team.
+                            </div>
+                        </div>
+
+                        <div class="form-group full-width">
+                            <label class="form-label">Vacancy / Requirements Context</label>
+                            <textarea
+                                class="form-control"
+                                placeholder="Paste the job description, requirements, responsibilities, tech stack, seniority level, and interview focus..."
+                                .value=${localStorage.getItem('vacancyContext') || ''}
+                                rows="5"
+                                data-context-key="vacancyContext"
+                                @input=${this.handleInterviewContextInput}
+                            ></textarea>
+                            <div class="form-description">
+                                Used to align HR and technical answers with the exact role requirements.
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                </div>
-            </div>
-        </div>
 
                 <!-- Audio & Microphone Section -->
                 <div class="settings-section">

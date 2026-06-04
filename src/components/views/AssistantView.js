@@ -352,6 +352,7 @@ export class AssistantView extends LitElement {
     getProfileNames() {
         return {
             interview: 'Job Interview',
+            behavioral: 'HR / Behavioral',
             sales: 'Sales Call',
             meeting: 'Business Meeting',
             presentation: 'Presentation',

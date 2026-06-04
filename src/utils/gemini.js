@@ -1,4 +1,4 @@
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenAI, createPartFromBase64, createUserContent } = require('@google/genai');
 const { BrowserWindow, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
@@ -167,6 +167,29 @@ function buildTextGenerationPrompt(question, source = 'text', options = {}) {
     return sections.join('\n\n');
 }
 
+function buildScreenshotGenerationPrompt(instruction, options = {}) {
+    const recentContext = getRecentConversationContext();
+    const sections = [];
+
+    if (recentContext) {
+        sections.push(`Recent conversation context:\n${recentContext}`);
+    }
+
+    sections.push('Current input source: screenshot');
+    sections.push(`Screenshot task:\n${instruction}`);
+
+    if (options.forceRussianAnswer || containsCyrillic(instruction)) {
+        sections.push(RUSSIAN_ANSWER_OVERRIDE);
+    }
+
+    sections.push('Use the screenshot as the primary source of truth.');
+    sections.push('If the screenshot contains a problem or question, solve that exact problem and explain the answer briefly.');
+    sections.push('If there are multiple tasks on screen, prioritize the most prominent active task.');
+    sections.push('Return the final answer only.');
+
+    return sections.join('\n\n');
+}
+
 function buildEffectiveTextSystemInstruction(forceRussianAnswer) {
     if (!forceRussianAnswer) {
         return geminiTextSystemPrompt;
@@ -300,6 +323,106 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
         return { success: true, text: finalResponse };
     } catch (error) {
         console.error('[Gemini text] Failed to generate answer:', error);
+        sendToRenderer('update-status', 'Error: ' + error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+async function generateAnswerFromScreenshot(instruction, imageBase64, mimeType = 'image/jpeg') {
+    if (!geminiTextClient) {
+        throw new Error('Gemini text client is not initialized');
+    }
+
+    const normalizedInstruction = String(instruction || '').trim();
+    if (!normalizedInstruction) {
+        return { success: false, error: 'Empty screenshot instruction' };
+    }
+
+    if (!imageBase64 || typeof imageBase64 !== 'string') {
+        return { success: false, error: 'Invalid screenshot data' };
+    }
+
+    const generationId = ++activeTextGenerationId;
+    let responseBuffer = '';
+
+    currentTranscription = `[Screenshot Task]: ${normalizedInstruction}\n`;
+    sendToRenderer('update-status', 'Analyzing screenshot...');
+
+    try {
+        const forceRussianAnswer = (await getStoredSetting('forceRussianAnswer', 'false')) === 'true';
+        const tools = shouldUseGoogleSearchForText(normalizedInstruction) ? geminiTextTools : [];
+        const modelCandidates = await getGeminiTextModelCandidates();
+        let stream = null;
+        let lastError = null;
+        let selectedModel = '';
+
+        const prompt = buildScreenshotGenerationPrompt(normalizedInstruction, { forceRussianAnswer });
+        const contents = createUserContent([createPartFromBase64(imageBase64, mimeType), { text: prompt }]);
+
+        for (const model of modelCandidates) {
+            try {
+                selectedModel = model;
+                console.log('[Gemini screenshot] Trying model:', model);
+                stream = await geminiTextClient.models.generateContentStream({
+                    model,
+                    contents,
+                    config: {
+                        systemInstruction: buildEffectiveTextSystemInstruction(forceRussianAnswer),
+                        tools,
+                        temperature: 0.25,
+                        topP: 0.9,
+                        maxOutputTokens: 1600,
+                        responseMimeType: 'text/plain',
+                    },
+                });
+                break;
+            } catch (error) {
+                lastError = error;
+                console.warn(`[Gemini screenshot] Model ${model} failed:`, error?.message || error);
+                if (!isRetryableTextModelError(error)) {
+                    throw error;
+                }
+            }
+        }
+
+        if (!stream) {
+            throw lastError || new Error('No screenshot-capable Gemini model available');
+        }
+
+        console.log('[Gemini screenshot] Selected model:', selectedModel);
+
+        for await (const chunk of stream) {
+            if (generationId !== activeTextGenerationId) {
+                console.log('[Gemini screenshot] Generation superseded, ignoring remaining chunks');
+                return { success: false, error: 'Generation superseded' };
+            }
+
+            const chunkText = typeof chunk.text === 'string' ? chunk.text : '';
+            if (!chunkText) {
+                continue;
+            }
+
+            responseBuffer += chunkText;
+            sendToRenderer('update-response', sanitizeAssistantResponse(responseBuffer));
+        }
+
+        const finalResponse = sanitizeAssistantResponse(responseBuffer);
+        if (!finalResponse) {
+            sendToRenderer('update-status', 'Error: Empty screenshot response');
+            return { success: false, error: 'Empty screenshot response' };
+        }
+
+        sendToRenderer('update-response', finalResponse);
+        sendToRenderer('update-status', 'Listening...');
+
+        if (currentTranscription && finalResponse) {
+            saveConversationTurn(currentTranscription, finalResponse);
+            currentTranscription = '';
+        }
+
+        return { success: true, response: finalResponse };
+    } catch (error) {
+        console.error('Error generating screenshot answer:', error);
         sendToRenderer('update-status', 'Error: ' + error.message);
         return { success: false, error: error.message };
     }
@@ -1019,6 +1142,23 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         }
     });
 
+    ipcMain.handle('send-screenshot-prompt', async (event, { instruction, data, mimeType = 'image/jpeg' }) => {
+        try {
+            if (!instruction || typeof instruction !== 'string' || instruction.trim().length === 0) {
+                return { success: false, error: 'Invalid screenshot instruction' };
+            }
+
+            if (!data || typeof data !== 'string') {
+                return { success: false, error: 'Invalid screenshot data' };
+            }
+
+            return await generateAnswerFromScreenshot(instruction.trim(), data, mimeType);
+        } catch (error) {
+            console.error('Error sending screenshot prompt:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
     ipcMain.handle('start-macos-audio', async event => {
         if (process.platform !== 'darwin') {
             return {
@@ -1122,4 +1262,5 @@ module.exports = {
     setupGeminiIpcHandlers,
     attemptReconnection,
     formatSpeakerResults,
+    buildScreenshotGenerationPrompt,
 };

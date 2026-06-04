@@ -152,13 +152,39 @@ function arrayBufferToBase64(buffer) {
 async function initializeGemini(profile = 'interview', language = 'en-US') {
     const apiKey = localStorage.getItem('apiKey')?.trim();
     if (apiKey) {
-        const success = await ipcRenderer.invoke('initialize-gemini', apiKey, localStorage.getItem('customPrompt') || '', profile, language);
+        const success = await ipcRenderer.invoke('initialize-gemini', apiKey, buildSessionContext(), profile, language);
         if (success) {
             cheddar.setStatus('Live');
         } else {
             cheddar.setStatus('error');
         }
     }
+}
+
+function buildSessionContext() {
+    const sections = [];
+    const customPrompt = (localStorage.getItem('customPrompt') || '').trim();
+    const candidateContext = (localStorage.getItem('candidateContext') || '').trim();
+    const companyContext = (localStorage.getItem('companyContext') || '').trim();
+    const vacancyContext = (localStorage.getItem('vacancyContext') || '').trim();
+
+    if (candidateContext) {
+        sections.push(`Candidate profile and personal experience\n-----\n${candidateContext}\n-----`);
+    }
+
+    if (companyContext) {
+        sections.push(`Target company context\n-----\n${companyContext}\n-----`);
+    }
+
+    if (vacancyContext) {
+        sections.push(`Vacancy requirements and role context\n-----\n${vacancyContext}\n-----`);
+    }
+
+    if (customPrompt) {
+        sections.push(`Additional custom instructions\n-----\n${customPrompt}\n-----`);
+    }
+
+    return sections.join('\n\n');
 }
 
 function shouldUseNativeMacOSMicTranscription(audioMode) {
@@ -550,53 +576,102 @@ async function captureScreenshot(imageQuality = 'medium', isManual = false) {
             qualityValue = 0.7; // Default to medium
     }
 
-    offscreenCanvas.toBlob(
-        async blob => {
-            if (!blob) {
-                console.error('Failed to create blob from canvas');
-                return;
-            }
-
-            const reader = new FileReader();
-            reader.onloadend = async () => {
-                const base64data = reader.result.split(',')[1];
-
-                // Validate base64 data
-                if (!base64data || base64data.length < 100) {
-                    console.error('Invalid base64 data generated');
+    return new Promise(resolve => {
+        offscreenCanvas.toBlob(
+            async blob => {
+                if (!blob) {
+                    console.error('Failed to create blob from canvas');
+                    resolve({ success: false, error: 'Failed to create screenshot blob' });
                     return;
                 }
 
-                const result = await ipcRenderer.invoke('send-image-content', {
-                    data: base64data,
-                });
+                const reader = new FileReader();
+                reader.onloadend = async () => {
+                    const base64data = reader.result.split(',')[1];
 
-                if (result.success) {
-                    // Track image tokens after successful send
-                    const imageTokens = tokenTracker.calculateImageTokens(offscreenCanvas.width, offscreenCanvas.height);
-                    tokenTracker.addTokens(imageTokens, 'image');
-                    console.log(`📊 Image sent successfully - ${imageTokens} tokens used (${offscreenCanvas.width}x${offscreenCanvas.height})`);
-                } else {
-                    console.error('Failed to send image:', result.error);
-                }
-            };
-            reader.readAsDataURL(blob);
-        },
-        'image/jpeg',
-        qualityValue
-    );
+                    if (!base64data || base64data.length < 100) {
+                        console.error('Invalid base64 data generated');
+                        resolve({ success: false, error: 'Invalid base64 data generated' });
+                        return;
+                    }
+
+                    if (isManual) {
+                        resolve({
+                            success: true,
+                            data: base64data,
+                            mimeType: 'image/jpeg',
+                            width: offscreenCanvas.width,
+                            height: offscreenCanvas.height,
+                        });
+                        return;
+                    }
+
+                    const result = await ipcRenderer.invoke('send-image-content', {
+                        data: base64data,
+                    });
+
+                    if (result.success) {
+                        const imageTokens = tokenTracker.calculateImageTokens(offscreenCanvas.width, offscreenCanvas.height);
+                        tokenTracker.addTokens(imageTokens, 'image');
+                        console.log(`📊 Image sent successfully - ${imageTokens} tokens used (${offscreenCanvas.width}x${offscreenCanvas.height})`);
+                    } else {
+                        console.error('Failed to send image:', result.error);
+                    }
+
+                    resolve({
+                        success: result.success,
+                        error: result.error,
+                        data: base64data,
+                        mimeType: 'image/jpeg',
+                        width: offscreenCanvas.width,
+                        height: offscreenCanvas.height,
+                    });
+                };
+                reader.readAsDataURL(blob);
+            },
+            'image/jpeg',
+            qualityValue
+        );
+    });
 }
 
 async function captureManualScreenshot(imageQuality = null) {
     console.log('Manual screenshot triggered');
     const quality = imageQuality || currentImageQuality;
-    await captureScreenshot(quality, true); // Pass true for isManual
-    await new Promise(resolve => setTimeout(resolve, 2000)); // TODO shitty hack
-    await sendTextMessage(`Help me on this page, give me the answer no bs, complete answer.
-        So if its a code question, give me the approach in few bullet points, then the entire code. Also if theres anything else i need to know, tell me.
-        If its a question about the website, give me the answer no bs, complete answer.
-        If its a mcq question, give me the answer no bs, complete answer.
-        `);
+    const app = cheddar.element();
+    if (app) {
+        app._awaitingNewResponse = true;
+        app._currentResponseIsComplete = true;
+    }
+
+    const screenshot = await captureScreenshot(quality, true);
+    if (!screenshot?.success) {
+        console.error('Manual screenshot failed:', screenshot?.error);
+        cheddar.setStatus('Error capturing screenshot');
+        return { success: false, error: screenshot?.error || 'Manual screenshot failed' };
+    }
+
+    const instruction = `Analyze the screenshot and answer the task shown on the screen.
+If the screen shows a coding problem, provide:
+- a short approach in a few bullets
+- the complete final code
+- any important caveats or edge cases if they matter
+If the screen shows a multiple-choice question, identify the correct option and briefly explain why.
+If the screen shows a math, logic, or theory question, solve it directly and include a short explanation.
+Focus on the main visible task and give the exact answer the user needs.`;
+
+    const result = await ipcRenderer.invoke('send-screenshot-prompt', {
+        instruction,
+        data: screenshot.data,
+        mimeType: screenshot.mimeType,
+    });
+
+    if (!result.success) {
+        console.error('Failed to get screenshot answer:', result.error);
+        cheddar.setStatus('Error: ' + result.error);
+    }
+
+    return result;
 }
 
 async function resetContextAndCapture() {
@@ -817,6 +892,9 @@ ipcRenderer.on('clear-sensitive-data', () => {
     console.log('Clearing renderer-side sensitive data...');
     localStorage.removeItem('apiKey');
     localStorage.removeItem('customPrompt');
+    localStorage.removeItem('candidateContext');
+    localStorage.removeItem('companyContext');
+    localStorage.removeItem('vacancyContext');
     // Consider clearing IndexedDB as well for full erasure
 });
 
@@ -852,6 +930,7 @@ const cheddar = {
 
     // Core functionality
     initializeGemini,
+    buildSessionContext,
     startCapture,
     stopCapture,
     sendTextMessage,
