@@ -14,7 +14,8 @@ export class AssistantView extends LitElement {
         }
 
         .response-container {
-            height: calc(100% - 60px);
+            flex: 1;
+            min-height: 0;
             overflow-y: auto;
             border-radius: 10px;
             font-size: var(--response-font-size, 18px);
@@ -24,6 +25,26 @@ export class AssistantView extends LitElement {
             scroll-behavior: smooth;
             user-select: text;
             cursor: text;
+        }
+
+        .interviewer-transcript {
+            margin: 0 0 8px;
+            padding: 8px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.18);
+            color: var(--description-color);
+            font-size: 12px;
+            line-height: 1.4;
+            user-select: text;
+        }
+
+        .interviewer-transcript.partial {
+            opacity: 0.65;
+        }
+
+        .interviewer-transcript strong {
+            color: var(--text-color);
         }
 
         /* Allow text selection for all content within the response container */
@@ -328,6 +349,8 @@ export class AssistantView extends LitElement {
         onToggleListening: { type: Function },
         shouldAnimateResponse: { type: Boolean },
         savedResponses: { type: Array },
+        interviewerTranscript: { type: String },
+        interviewerTranscriptFinal: { type: Boolean },
     };
 
     constructor() {
@@ -341,6 +364,8 @@ export class AssistantView extends LitElement {
         this._lastAnimatedWordCount = 0;
         this._animatedResponseIndexes = new Set();
         this.boundSaveShortcutHandler = null;
+        this.interviewerTranscript = '';
+        this.interviewerTranscriptFinal = false;
         // Load saved responses from localStorage
         try {
             this.savedResponses = JSON.parse(localStorage.getItem('savedResponses') || '[]');
@@ -503,10 +528,16 @@ export class AssistantView extends LitElement {
                 this.scrollResponseDown();
             };
 
+            this.handleInterviewerTranscription = (event, payload) => {
+                this.interviewerTranscript = payload?.text || '';
+                this.interviewerTranscriptFinal = payload?.final === true;
+            };
+
             ipcRenderer.on('navigate-previous-response', this.handlePreviousResponse);
             ipcRenderer.on('navigate-next-response', this.handleNextResponse);
             ipcRenderer.on('scroll-response-up', this.handleScrollUp);
             ipcRenderer.on('scroll-response-down', this.handleScrollDown);
+            ipcRenderer.on('interviewer-transcription', this.handleInterviewerTranscription);
         }
 
         this.boundSaveShortcutHandler = e => {
@@ -539,6 +570,9 @@ export class AssistantView extends LitElement {
             }
             if (this.handleScrollDown) {
                 ipcRenderer.removeListener('scroll-response-down', this.handleScrollDown);
+            }
+            if (this.handleInterviewerTranscription) {
+                ipcRenderer.removeListener('interviewer-transcription', this.handleInterviewerTranscription);
             }
         }
 
@@ -668,6 +702,13 @@ export class AssistantView extends LitElement {
         const isSaved = this.isResponseSaved();
 
         return html`
+            ${this.interviewerTranscript
+                ? html`
+                      <div class="interviewer-transcript ${this.interviewerTranscriptFinal ? '' : 'partial'}">
+                          <strong>Interviewer:</strong> ${this.interviewerTranscript}
+                      </div>
+                  `
+                : ''}
             <div class="response-container" id="responseContainer"></div>
 
             <div class="text-input-container">

@@ -8,6 +8,11 @@ const {
     stopNativeMacOSMicTranscription,
     isNativeMacOSMicTranscriptionEnabled,
 } = require('./nativeMacOSMicTranscription');
+const {
+    DEFAULT_MIN_CHARS,
+    DEFAULT_SILENCE_MS,
+    createInterviewerTranscriptBuffer,
+} = require('./interviewerTranscription');
 
 // Conversation tracking variables
 let currentSessionId = null;
@@ -21,6 +26,15 @@ let geminiTextTools = [];
 let activeTextGenerationId = 0;
 let lastSubmittedText = '';
 let lastSubmittedTextAt = 0;
+let activeAudioMode = 'speaker_only';
+let interviewerTranscriptBuffer = null;
+let systemAudioStats = {
+    chunks: 0,
+    clippedSamples: 0,
+    peak: 0,
+    rmsTotal: 0,
+    lastLogAt: 0,
+};
 
 const DEFAULT_GEMINI_TEXT_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash-001'];
 
@@ -82,6 +96,15 @@ function sanitizeAssistantResponse(text) {
 }
 
 const TRANSCRIPT_CORRECTIONS = [
+    [/\bhave\s+to\s+(?=im\s*prove\b|improve\b)/gi, 'how to '],
+    [/\bim\s+prove\b/gi, 'improve'],
+    [/\bper\s+formance\b/gi, 'performance'],
+    [/\bapp?lica?\s+tions?\b/gi, 'applications'],
+    [/\baplica\s+tions?\b/gi, 'applications'],
+    [/\bopti\s+mize\b/gi, 'optimize'],
+    [/\bopti\s+mization\b/gi, 'optimization'],
+    [/\bre\s+render(?:s|ing)?\b/gi, 're-rendering'],
+    [/\bdata\s+base\b/gi, 'database'],
     [/\bреакт(?:е|а|ом)?\b/gi, 'React'],
     [/\bреакц(?:ия|ии|ию|ией)\b/gi, 'React'],
     [/\bриакт\b/gi, 'React'],
@@ -147,6 +170,10 @@ function containsCyrillic(text) {
     return /[А-Яа-яЁё]/.test(text);
 }
 
+function needsRussianAnswerRepair(text, forceRussianAnswer) {
+    return forceRussianAnswer && Boolean(String(text || '').trim()) && !containsCyrillic(text);
+}
+
 function buildTextGenerationPrompt(question, source = 'text', options = {}) {
     const recentContext = getRecentConversationContext();
     const sections = [];
@@ -157,6 +184,21 @@ function buildTextGenerationPrompt(question, source = 'text', options = {}) {
 
     sections.push(`Current input source: ${source}`);
     sections.push(`Current question:\n${question}`);
+
+    if (source === 'system_audio') {
+        sections.push(
+            [
+                'SPEECH TRANSCRIPTION RULES:',
+                '- The current question came from automatic speech recognition and may contain split words, missing punctuation, or a small phonetic error.',
+                '- Silently reconstruct the most likely interview question before answering.',
+                '- Answer one narrow question only. Do not turn an ambiguous question into a survey of every skill in the candidate resume.',
+                '- Prefer explicit terms in the current question, then recent dialogue, then the target role/vacancy context.',
+                '- If application performance is asked in a frontend or React interview and no backend term is present, answer about frontend/React performance only.',
+                '- Do not introduce backend, databases, cloud infrastructure, cost optimization, or AI tools unless the current question or recent dialogue explicitly points there.',
+                '- Use the resume to personalize a relevant example, not to enumerate unrelated experience.',
+            ].join('\n')
+        );
+    }
 
     if (options.forceRussianAnswer || containsCyrillic(question)) {
         sections.push(RUSSIAN_ANSWER_OVERRIDE);
@@ -246,7 +288,12 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
 
     const generationId = ++activeTextGenerationId;
     let responseBuffer = '';
-    const transcriptionLine = source === 'native_mic' ? `[Candidate]: ${normalizedTranscript}` : normalizedTranscript;
+    const transcriptionLine =
+        source === 'native_mic'
+            ? `[Candidate]: ${normalizedTranscript}`
+            : source === 'system_audio'
+              ? `[Interviewer]: ${normalizedTranscript}`
+              : normalizedTranscript;
 
     currentTranscription = `${transcriptionLine}\n`;
 
@@ -274,7 +321,7 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
                     config: {
                         systemInstruction: buildEffectiveTextSystemInstruction(forceRussianAnswer),
                         tools,
-                        temperature: 0.35,
+                        temperature: source === 'system_audio' ? 0.2 : 0.35,
                         topP: 0.9,
                         maxOutputTokens: 1200,
                         responseMimeType: 'text/plain',
@@ -311,7 +358,31 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
             return { success: true, skipped: true, reason: 'superseded' };
         }
 
-        const finalResponse = sanitizeAssistantResponse(responseBuffer);
+        let finalResponse = sanitizeAssistantResponse(responseBuffer);
+
+        if (needsRussianAnswerRepair(finalResponse, forceRussianAnswer)) {
+            console.warn('[Gemini text] Retrying because the forced-Russian answer contained no Cyrillic');
+            const repairResponse = await geminiTextClient.models.generateContent({
+                model: selectedModel,
+                contents: [
+                    'Rewrite the answer below in Russian.',
+                    'Preserve technical terms such as React, JavaScript, TypeScript, API, render, memoization, and database in English when natural.',
+                    'Do not add new topics or explanations. Return only the corrected ready-to-speak answer.',
+                    `Answer to rewrite:\n${finalResponse}`,
+                ].join('\n\n'),
+                config: {
+                    systemInstruction: RUSSIAN_ANSWER_OVERRIDE,
+                    temperature: 0.1,
+                    maxOutputTokens: 1200,
+                    responseMimeType: 'text/plain',
+                },
+            });
+            const repairedResponse = sanitizeAssistantResponse(repairResponse.text);
+            if (repairedResponse) {
+                finalResponse = repairedResponse;
+            }
+        }
+
         sendToRenderer('update-response', finalResponse);
         sendToRenderer('update-status', 'Ready');
 
@@ -501,7 +572,7 @@ function getCurrentSessionData() {
 }
 
 async function sendReconnectionContext() {
-    if (!global.geminiSessionRef?.current || conversationHistory.length === 0) {
+    if (activeAudioMode === 'speaker_only' || !global.geminiSessionRef?.current || conversationHistory.length === 0) {
         return;
     }
 
@@ -600,6 +671,79 @@ async function handleNativeMicTranscript(payload) {
     }
 }
 
+function parseBoundedInteger(value, fallback, min, max) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) {
+        return fallback;
+    }
+    return Math.min(max, Math.max(min, parsed));
+}
+
+function clearInterviewerTranscriptBuffer() {
+    if (interviewerTranscriptBuffer) {
+        interviewerTranscriptBuffer.reset();
+    }
+    sendToRenderer('interviewer-transcription', {
+        text: '',
+        final: false,
+    });
+}
+
+function resetInterviewerTranscriptBuffer() {
+    clearInterviewerTranscriptBuffer();
+    interviewerTranscriptBuffer = null;
+}
+
+function configureInterviewerTranscriptBuffer({ silenceMs, minChars }) {
+    resetInterviewerTranscriptBuffer();
+
+    interviewerTranscriptBuffer = createInterviewerTranscriptBuffer({
+        silenceMs,
+        minChars,
+        onUpdate: transcript => {
+            console.log('[Interviewer transcription][partial]', transcript);
+            sendToRenderer('interviewer-transcription', {
+                text: transcript,
+                final: false,
+            });
+        },
+        onFinalize: async (transcript, reason) => {
+            if (activeAudioMode !== 'speaker_only') {
+                return;
+            }
+
+            sendToRenderer('interviewer-transcription', {
+                text: transcript,
+                final: true,
+                reason,
+            });
+            sendToRenderer('update-status', 'Interviewer question recognized');
+            await generateTextAnswerFromTranscript(transcript, 'system_audio');
+        },
+    });
+}
+
+function isTerminalLiveSessionError(message) {
+    const normalized = String(message || '').toLowerCase();
+    return (
+        normalized.includes('api key not valid') ||
+        normalized.includes('invalid api key') ||
+        normalized.includes('authentication failed') ||
+        normalized.includes('unauthorized') ||
+        normalized.includes('requested combination of response modalities') ||
+        (normalized.includes('response modalities') && normalized.includes('not supported')) ||
+        (normalized.includes('model') && normalized.includes('not found')) ||
+        normalized.includes('invalid argument')
+    );
+}
+
+function stopLiveReconnection(reason, statusPrefix = 'Session closed') {
+    console.log('Non-retryable Live session error:', reason);
+    lastSessionParams = null;
+    reconnectionAttempts = maxReconnectionAttempts;
+    sendToRenderer('update-status', `${statusPrefix}: ${reason}`);
+}
+
 async function attemptReconnection() {
     if (!lastSessionParams || reconnectionAttempts >= maxReconnectionAttempts) {
         console.log('Max reconnection attempts reached or no session params stored');
@@ -656,6 +800,28 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     sendToRenderer('session-initializing', true);
 
     const forceRussianAnswer = (await getStoredSetting('forceRussianAnswer', 'false')) === 'true';
+    activeAudioMode = await getStoredSetting('audioMode', 'speaker_only');
+    const interviewerSilenceMs = parseBoundedInteger(
+        await getStoredSetting('interviewerSilenceMs', String(DEFAULT_SILENCE_MS)),
+        DEFAULT_SILENCE_MS,
+        700,
+        4000
+    );
+    const interviewerMinChars = parseBoundedInteger(
+        await getStoredSetting('interviewerMinChars', String(DEFAULT_MIN_CHARS)),
+        DEFAULT_MIN_CHARS,
+        3,
+        50
+    );
+
+    if (activeAudioMode === 'speaker_only') {
+        configureInterviewerTranscriptBuffer({
+            silenceMs: interviewerSilenceMs,
+            minChars: interviewerMinChars,
+        });
+    } else {
+        resetInterviewerTranscriptBuffer();
+    }
 
     // Store session parameters for reconnection (only if not already reconnecting)
     if (!isReconnection) {
@@ -665,6 +831,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
             profile,
             language,
             forceRussianAnswer,
+            audioMode: activeAudioMode,
         };
         reconnectionAttempts = 0; // Reset counter for new session
     }
@@ -691,6 +858,9 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         model: 'gemini-2.0-flash-001',
         forceRussianAnswer,
         googleSearchEnabled,
+        audioMode: activeAudioMode,
+        interviewerSilenceMs,
+        interviewerMinChars,
     });
 
     // Initialize new conversation session (only if not reconnecting)
@@ -700,6 +870,16 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     messageBuffer = '';
     rawMessageBuffer = '';
 
+    const speakerOnlyMode = activeAudioMode === 'speaker_only';
+    const liveSystemPrompt = speakerOnlyMode
+        ? [
+              'You are a low-latency speech transcription transport.',
+              `The expected interview language is ${language}. Technical terms may be spoken in English.`,
+              'Do not answer the speaker and do not solve interview questions.',
+              'After each detected turn, return only a single period.',
+          ].join('\n')
+        : systemPrompt;
+
     try {
         const session = await client.live.connect({
             model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -708,13 +888,30 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     sendToRenderer('update-status', 'Live session connected');
                 },
                 onmessage: function (message) {
-                    if (message.serverContent?.inputTranscription?.results) {
-                        currentTranscription += formatSpeakerResults(message.serverContent.inputTranscription.results);
+                    const serverContent = message.serverContent;
+
+                    if (speakerOnlyMode) {
+                        if (serverContent?.inputTranscription) {
+                            interviewerTranscriptBuffer?.add(serverContent.inputTranscription);
+                        }
+
+                        // Input transcription can arrive after the model turn.
+                        // A late transcription update replaces this short finalization timer.
+                        if (serverContent?.turnComplete) {
+                            interviewerTranscriptBuffer?.scheduleFinalize(350, 'turn_complete');
+                        }
+                        return;
+                    }
+
+                    if (serverContent?.inputTranscription?.results) {
+                        currentTranscription += formatSpeakerResults(serverContent.inputTranscription.results);
+                    } else if (serverContent?.inputTranscription?.text) {
+                        currentTranscription += `[Interviewer]: ${serverContent.inputTranscription.text}\n`;
                     }
 
                     // Handle AI model response
-                    if (message.serverContent?.modelTurn?.parts) {
-                        for (const part of message.serverContent.modelTurn.parts) {
+                    if (serverContent?.modelTurn?.parts) {
+                        for (const part of serverContent.modelTurn.parts) {
                             if (part.text) {
                                 rawMessageBuffer += part.text;
                                 messageBuffer = sanitizeAssistantResponse(rawMessageBuffer);
@@ -723,13 +920,13 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                         }
                     }
 
-                    if (message.serverContent?.outputTranscription?.text) {
-                        rawMessageBuffer += message.serverContent.outputTranscription.text;
+                    if (serverContent?.outputTranscription?.text) {
+                        rawMessageBuffer += serverContent.outputTranscription.text;
                         messageBuffer = sanitizeAssistantResponse(rawMessageBuffer);
                         sendToRenderer('update-response', messageBuffer);
                     }
 
-                    if (message.serverContent?.generationComplete) {
+                    if (serverContent?.generationComplete) {
                         messageBuffer = sanitizeAssistantResponse(rawMessageBuffer);
                         sendToRenderer('update-response', messageBuffer);
 
@@ -743,26 +940,15 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                         rawMessageBuffer = '';
                     }
 
-                    if (message.serverContent?.turnComplete) {
+                    if (serverContent?.turnComplete) {
                         sendToRenderer('update-status', 'Listening...');
                     }
                 },
                 onerror: function (e) {
                     console.debug('Error:', e.message);
 
-                    // Check if the error is related to invalid API key
-                    const isApiKeyError =
-                        e.message &&
-                        (e.message.includes('API key not valid') ||
-                            e.message.includes('invalid API key') ||
-                            e.message.includes('authentication failed') ||
-                            e.message.includes('unauthorized'));
-
-                    if (isApiKeyError) {
-                        console.log('Error due to invalid API key - stopping reconnection attempts');
-                        lastSessionParams = null; // Clear session params to prevent reconnection
-                        reconnectionAttempts = maxReconnectionAttempts; // Stop further attempts
-                        sendToRenderer('update-status', 'Error: Invalid API key');
+                    if (isTerminalLiveSessionError(e.message)) {
+                        stopLiveReconnection(e.message, 'Live error');
                         return;
                     }
 
@@ -771,19 +957,8 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 onclose: function (e) {
                     console.debug('Session closed:', e.reason);
 
-                    // Check if the session closed due to invalid API key
-                    const isApiKeyError =
-                        e.reason &&
-                        (e.reason.includes('API key not valid') ||
-                            e.reason.includes('invalid API key') ||
-                            e.reason.includes('authentication failed') ||
-                            e.reason.includes('unauthorized'));
-
-                    if (isApiKeyError) {
-                        console.log('Session closed due to invalid API key - stopping reconnection attempts');
-                        lastSessionParams = null; // Clear session params to prevent reconnection
-                        reconnectionAttempts = maxReconnectionAttempts; // Stop further attempts
-                        sendToRenderer('update-status', 'Session closed: Invalid API key');
+                    if (isTerminalLiveSessionError(e.reason)) {
+                        stopLiveReconnection(e.reason);
                         return;
                     }
 
@@ -797,18 +972,29 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 },
             },
             config: {
+                // Native-audio models require AUDIO output. Speaker-only mode ignores
+                // that output and uses inputAudioTranscription for the text pipeline.
                 responseModalities: ['AUDIO'],
-                tools: enabledTools,
-                // Enable speaker diarization
-                inputAudioTranscription: {
-                    enableSpeakerDiarization: true,
-                    minSpeakerCount: 2,
-                    maxSpeakerCount: 2,
-                },
-                contextWindowCompression: { slidingWindow: {} },
+                tools: speakerOnlyMode ? [] : enabledTools,
+                inputAudioTranscription: {},
                 outputAudioTranscription: {},
+                ...(speakerOnlyMode
+                    ? {
+                          realtimeInputConfig: {
+                              automaticActivityDetection: {
+                                  startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+                                  endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+                                  prefixPaddingMs: 300,
+                                  silenceDurationMs: interviewerSilenceMs,
+                              },
+                              activityHandling: 'START_OF_ACTIVITY_INTERRUPTS',
+                              turnCoverage: 'TURN_INCLUDES_ONLY_ACTIVITY',
+                          },
+                      }
+                    : {}),
+                contextWindowCompression: { slidingWindow: {} },
                 systemInstruction: {
-                    parts: [{ text: systemPrompt }],
+                    parts: [{ text: liveSystemPrompt }],
                 },
             },
         });
@@ -921,6 +1107,13 @@ async function startMacOSAudioCapture(geminiSessionRef, options = {}) {
     const CHUNK_SIZE = SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS * CHUNK_DURATION;
 
     let audioBuffer = Buffer.alloc(0);
+    systemAudioStats = {
+        chunks: 0,
+        clippedSamples: 0,
+        peak: 0,
+        rmsTotal: 0,
+        lastLogAt: Date.now(),
+    };
 
     systemAudioProc.stdout.on('data', data => {
         audioBuffer = Buffer.concat([audioBuffer, data]);
@@ -930,6 +1123,7 @@ async function startMacOSAudioCapture(geminiSessionRef, options = {}) {
             audioBuffer = audioBuffer.slice(CHUNK_SIZE);
 
             const monoChunk = CHANNELS === 2 ? convertStereoToMono(chunk) : chunk;
+            trackSystemAudioQuality(monoChunk);
             const base64Data = monoChunk.toString('base64');
             sendAudioToGemini(base64Data, geminiSessionRef);
 
@@ -980,15 +1174,75 @@ function convertStereoToMono(stereoBuffer) {
 
     for (let i = 0; i < samples; i++) {
         const leftSample = stereoBuffer.readInt16LE(i * 4);
-        monoBuffer.writeInt16LE(leftSample, i * 2);
+        const rightSample = stereoBuffer.readInt16LE(i * 4 + 2);
+        const mixedSample = Math.round((leftSample + rightSample) / 2);
+        monoBuffer.writeInt16LE(Math.max(-32768, Math.min(32767, mixedSample)), i * 2);
     }
 
     return monoBuffer;
 }
 
+function analyzePcm16(buffer) {
+    if (!buffer || buffer.length < 2) {
+        return { samples: 0, rms: 0, peak: 0, clippedSamples: 0 };
+    }
+
+    const samples = Math.floor(buffer.length / 2);
+    let squareSum = 0;
+    let peak = 0;
+    let clippedSamples = 0;
+
+    for (let i = 0; i < samples; i++) {
+        const sample = buffer.readInt16LE(i * 2);
+        const absoluteSample = Math.abs(sample);
+        squareSum += sample * sample;
+        peak = Math.max(peak, absoluteSample);
+        if (absoluteSample >= 32760) {
+            clippedSamples++;
+        }
+    }
+
+    return {
+        samples,
+        rms: Math.sqrt(squareSum / samples),
+        peak,
+        clippedSamples,
+    };
+}
+
+function trackSystemAudioQuality(buffer) {
+    const analysis = analyzePcm16(buffer);
+    systemAudioStats.chunks++;
+    systemAudioStats.rmsTotal += analysis.rms;
+    systemAudioStats.peak = Math.max(systemAudioStats.peak, analysis.peak);
+    systemAudioStats.clippedSamples += analysis.clippedSamples;
+
+    const now = Date.now();
+    if (now - systemAudioStats.lastLogAt < 10000) {
+        return;
+    }
+
+    const averageRms = systemAudioStats.rmsTotal / Math.max(1, systemAudioStats.chunks);
+    console.log('[System audio quality]', {
+        averageRms: Math.round(averageRms),
+        peak: systemAudioStats.peak,
+        clippedSamples: systemAudioStats.clippedSamples,
+        signal: averageRms < 80 ? 'too_quiet' : averageRms > 18000 ? 'too_loud' : 'ok',
+    });
+
+    systemAudioStats = {
+        chunks: 0,
+        clippedSamples: 0,
+        peak: 0,
+        rmsTotal: 0,
+        lastLogAt: now,
+    };
+}
+
 function stopMacOSAudioCapture() {
     stopRequestedForSystemAudio = true;
     stopNativeMacOSMicTranscription();
+    clearInterviewerTranscriptBuffer();
     if (systemAudioRestartTimer) {
         clearTimeout(systemAudioRestartTimer);
         systemAudioRestartTimer = null;
@@ -1189,6 +1443,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     ipcMain.handle('close-session', async event => {
         try {
             stopMacOSAudioCapture();
+            resetInterviewerTranscriptBuffer();
 
             // Clear session params to prevent reconnection when user closes session
             lastSessionParams = null;
@@ -1257,10 +1512,15 @@ module.exports = {
     killExistingSystemAudioDump,
     startMacOSAudioCapture,
     convertStereoToMono,
+    analyzePcm16,
     stopMacOSAudioCapture,
     sendAudioToGemini,
     setupGeminiIpcHandlers,
     attemptReconnection,
+    isTerminalLiveSessionError,
     formatSpeakerResults,
+    normalizeTranscriptForModel,
+    needsRussianAnswerRepair,
+    buildTextGenerationPrompt,
     buildScreenshotGenerationPrompt,
 };

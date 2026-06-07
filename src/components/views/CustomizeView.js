@@ -1018,6 +1018,36 @@ export class CustomizeView extends LitElement {
                                 Choose which audio sources to capture for the AI.
                             </div>
                         </div>
+                        <div class="form-group">
+                            <label class="form-label">Interviewer End-of-Speech Pause</label>
+                            <input
+                                class="form-control"
+                                type="number"
+                                min="700"
+                                max="4000"
+                                step="100"
+                                .value=${localStorage.getItem('interviewerSilenceMs') || '1500'}
+                                @change=${e => localStorage.setItem('interviewerSilenceMs', e.target.value)}
+                            />
+                            <div class="form-description">
+                                Milliseconds of silence before the interviewer question is submitted. Recommended: 1200-1800.
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Minimum Interviewer Fragment</label>
+                            <input
+                                class="form-control"
+                                type="number"
+                                min="3"
+                                max="50"
+                                step="1"
+                                .value=${localStorage.getItem('interviewerMinChars') || '8'}
+                                @change=${e => localStorage.setItem('interviewerMinChars', e.target.value)}
+                            />
+                            <div class="form-description">
+                                Ignores short acknowledgements and accidental audio fragments. Applied when the next session starts.
+                            </div>
+                        </div>
                         ${cheddar.isMacOS
                             ? html`
                                   <div class="form-group">
