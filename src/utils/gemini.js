@@ -8,11 +8,9 @@ const {
     stopNativeMacOSMicTranscription,
     isNativeMacOSMicTranscriptionEnabled,
 } = require('./nativeMacOSMicTranscription');
-const {
-    DEFAULT_MIN_CHARS,
-    DEFAULT_SILENCE_MS,
-    createInterviewerTranscriptBuffer,
-} = require('./interviewerTranscription');
+const { startCoreAudioTapProcess } = require('./coreAudioTapCapture');
+const { createPcm16AudioActivityGate } = require('./audioActivityGate');
+const { DEFAULT_MIN_CHARS, DEFAULT_SILENCE_MS, createInterviewerTranscriptBuffer } = require('./interviewerTranscription');
 
 // Conversation tracking variables
 let currentSessionId = null;
@@ -26,8 +24,11 @@ let geminiTextTools = [];
 let activeTextGenerationId = 0;
 let lastSubmittedText = '';
 let lastSubmittedTextAt = 0;
+let textGenerationInProgress = false;
+let queuedTextRequest = null;
 let activeAudioMode = 'speaker_only';
 let interviewerTranscriptBuffer = null;
+let sessionTokenUsage = createEmptyTokenUsage();
 let systemAudioStats = {
     chunks: 0,
     clippedSamples: 0,
@@ -75,7 +76,9 @@ function isInternalReasoningParagraph(paragraph) {
 }
 
 function sanitizeAssistantResponse(text) {
-    const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+    const normalized = String(text || '')
+        .replace(/\r\n/g, '\n')
+        .trim();
     if (!normalized) {
         return '';
     }
@@ -157,15 +160,6 @@ function normalizeTranscriptForModel(text) {
     return normalized.replace(/\s{2,}/g, ' ').trim();
 }
 
-function getRecentConversationContext() {
-    return conversationHistory
-        .slice(-6)
-        .map((turn, index) => {
-            return `Turn ${index + 1}\nQuestion:\n${turn.transcription}\nAnswer:\n${turn.ai_response}`;
-        })
-        .join('\n\n');
-}
-
 function containsCyrillic(text) {
     return /[А-Яа-яЁё]/.test(text);
 }
@@ -175,12 +169,7 @@ function needsRussianAnswerRepair(text, forceRussianAnswer) {
 }
 
 function buildTextGenerationPrompt(question, source = 'text', options = {}) {
-    const recentContext = getRecentConversationContext();
     const sections = [];
-
-    if (recentContext) {
-        sections.push(`Recent interview context:\n${recentContext}`);
-    }
 
     sections.push(`Current input source: ${source}`);
     sections.push(`Current question:\n${question}`);
@@ -209,16 +198,48 @@ function buildTextGenerationPrompt(question, source = 'text', options = {}) {
     return sections.join('\n\n');
 }
 
-function buildScreenshotGenerationPrompt(instruction, options = {}) {
-    const recentContext = getRecentConversationContext();
-    const sections = [];
+const SCREENSHOT_MODE_INSTRUCTIONS = {
+    live_coding: [
+        'SCREENSHOT MODE: LIVE CODING',
+        '- Extract the exact coding task and constraints visible on the screen.',
+        '- Provide a correct implementation that can be submitted or typed immediately.',
+        '- Put the approach first in 2-4 concise bullets, then provide the complete final code.',
+        '- Include time and space complexity when relevant.',
+        '- Preserve the language, framework, function signature, and input/output format visible in the screenshot.',
+        '- Do not drift into code review unless the task explicitly asks for it.',
+    ].join('\n'),
+    code_review: [
+        'SCREENSHOT MODE: CODE REVIEW',
+        '- Review only the code visible in the screenshot.',
+        '- List concrete bugs, behavioral regressions, security issues, performance risks, and missing edge cases first.',
+        '- Order findings by severity and reference visible functions or lines when possible.',
+        '- Then provide the smallest practical correction or corrected snippet.',
+        '- Do not rewrite the entire solution unless the visible design cannot be fixed locally.',
+    ].join('\n'),
+    console_output: [
+        'SCREENSHOT MODE: CONSOLE OUTPUT',
+        '- Determine the exact console output in execution order.',
+        '- Show the output first in a code block.',
+        '- Then explain the order briefly.',
+        '- Account for event loop behavior, microtasks and macrotasks, promises, async/await, closures, hoisting, coercion, and mutation when present.',
+        '- Do not propose refactoring or alternative code unless the screenshot explicitly asks for it.',
+    ].join('\n'),
+};
 
-    if (recentContext) {
-        sections.push(`Recent conversation context:\n${recentContext}`);
-    }
+function normalizeScreenshotMode(mode) {
+    return Object.prototype.hasOwnProperty.call(SCREENSHOT_MODE_INSTRUCTIONS, mode) ? mode : 'default';
+}
+
+function buildScreenshotGenerationPrompt(instruction, options = {}) {
+    const sections = [];
+    const screenshotMode = normalizeScreenshotMode(options.mode);
 
     sections.push('Current input source: screenshot');
     sections.push(`Screenshot task:\n${instruction}`);
+
+    if (screenshotMode !== 'default') {
+        sections.push(SCREENSHOT_MODE_INSTRUCTIONS[screenshotMode]);
+    }
 
     if (options.forceRussianAnswer || containsCyrillic(instruction)) {
         sections.push(RUSSIAN_ANSWER_OVERRIDE);
@@ -254,17 +275,72 @@ async function getGeminiTextModelCandidates() {
     return [...new Set(models.filter(Boolean))];
 }
 
-function isRetryableTextModelError(error) {
-    const text = `${error?.message || ''} ${error?.status || ''} ${error?.code || ''}`.toLowerCase();
+function getErrorText(error) {
+    return `${error?.message || ''} ${error?.status || ''} ${error?.code || ''}`.toLowerCase();
+}
+
+function isQuotaError(error) {
+    const text = getErrorText(error);
+    return text.includes('429') || text.includes('too many requests') || text.includes('resource_exhausted') || text.includes('quota');
+}
+
+function isModelFallbackError(error) {
+    const text = getErrorText(error);
     return (
-        text.includes('429') ||
-        text.includes('too many requests') ||
-        text.includes('resource_exhausted') ||
-        text.includes('quota') ||
         text.includes('not found') ||
         text.includes('not supported') ||
-        text.includes('model')
+        (text.includes('model') && (text.includes('unavailable') || text.includes('unsupported')))
     );
+}
+
+function createEmptyTokenUsage() {
+    return {
+        answer: { requests: 0, promptTokens: 0, outputTokens: 0, totalTokens: 0 },
+        screenshot: { requests: 0, promptTokens: 0, outputTokens: 0, totalTokens: 0 },
+        liveAudio: { requests: 0, promptTokens: 0, outputTokens: 0, totalTokens: 0 },
+    };
+}
+
+function recordTokenUsage(category, usageMetadata) {
+    if (!usageMetadata || !sessionTokenUsage[category]) {
+        return;
+    }
+
+    const usage = sessionTokenUsage[category];
+    const outputTokens = Number(usageMetadata.candidatesTokenCount ?? usageMetadata.responseTokenCount) || 0;
+    usage.requests += 1;
+    usage.promptTokens += Number(usageMetadata.promptTokenCount) || 0;
+    usage.outputTokens += outputTokens;
+    usage.totalTokens += Number(usageMetadata.totalTokenCount) || 0;
+
+    console.log(`[Gemini usage][${category}]`, {
+        request: {
+            promptTokens: Number(usageMetadata.promptTokenCount) || 0,
+            outputTokens,
+            totalTokens: Number(usageMetadata.totalTokenCount) || 0,
+        },
+        session: { ...usage },
+    });
+}
+
+async function runQueuedTextRequest(transcript, source) {
+    textGenerationInProgress = true;
+    try {
+        return await generateTextAnswerNow(transcript, source);
+    } finally {
+        const nextRequest = queuedTextRequest;
+        queuedTextRequest = null;
+
+        if (nextRequest) {
+            setImmediate(() => {
+                runQueuedTextRequest(nextRequest.transcript, nextRequest.source).catch(error => {
+                    console.error('[Gemini text] Queued generation failed:', error);
+                });
+            });
+        } else {
+            textGenerationInProgress = false;
+        }
+    }
 }
 
 async function generateTextAnswerFromTranscript(transcript, source = 'text') {
@@ -278,7 +354,7 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
     }
 
     const now = Date.now();
-    if (normalizedTranscript === lastSubmittedText && now - lastSubmittedTextAt < 2500) {
+    if (normalizedTranscript === lastSubmittedText && now - lastSubmittedTextAt < 5000) {
         console.log('[Gemini text] Skipping duplicate transcript:', normalizedTranscript);
         return { success: true, skipped: true, reason: 'duplicate_transcript' };
     }
@@ -286,8 +362,19 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
     lastSubmittedText = normalizedTranscript;
     lastSubmittedTextAt = now;
 
+    if (textGenerationInProgress) {
+        queuedTextRequest = { transcript: normalizedTranscript, source };
+        console.log('[Gemini text] Queued latest transcript while an answer is active:', normalizedTranscript);
+        return { success: true, queued: true, reason: 'generation_in_progress' };
+    }
+
+    return runQueuedTextRequest(normalizedTranscript, source);
+}
+
+async function generateTextAnswerNow(normalizedTranscript, source = 'text') {
     const generationId = ++activeTextGenerationId;
     let responseBuffer = '';
+    let usageMetadata = null;
     const transcriptionLine =
         source === 'native_mic'
             ? `[Candidate]: ${normalizedTranscript}`
@@ -331,7 +418,7 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
             } catch (error) {
                 lastError = error;
                 console.warn(`[Gemini text] Model ${model} failed:`, error.message || error);
-                if (!isRetryableTextModelError(error)) {
+                if (isQuotaError(error) || !isModelFallbackError(error)) {
                     throw error;
                 }
             }
@@ -344,6 +431,10 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
         console.log('[Gemini text] Streaming answer with model:', selectedModel);
 
         for await (const chunk of stream) {
+            if (chunk.usageMetadata) {
+                usageMetadata = chunk.usageMetadata;
+            }
+
             if (generationId !== activeTextGenerationId) {
                 return { success: true, skipped: true, reason: 'superseded' };
             }
@@ -359,29 +450,7 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
         }
 
         let finalResponse = sanitizeAssistantResponse(responseBuffer);
-
-        if (needsRussianAnswerRepair(finalResponse, forceRussianAnswer)) {
-            console.warn('[Gemini text] Retrying because the forced-Russian answer contained no Cyrillic');
-            const repairResponse = await geminiTextClient.models.generateContent({
-                model: selectedModel,
-                contents: [
-                    'Rewrite the answer below in Russian.',
-                    'Preserve technical terms such as React, JavaScript, TypeScript, API, render, memoization, and database in English when natural.',
-                    'Do not add new topics or explanations. Return only the corrected ready-to-speak answer.',
-                    `Answer to rewrite:\n${finalResponse}`,
-                ].join('\n\n'),
-                config: {
-                    systemInstruction: RUSSIAN_ANSWER_OVERRIDE,
-                    temperature: 0.1,
-                    maxOutputTokens: 1200,
-                    responseMimeType: 'text/plain',
-                },
-            });
-            const repairedResponse = sanitizeAssistantResponse(repairResponse.text);
-            if (repairedResponse) {
-                finalResponse = repairedResponse;
-            }
-        }
+        recordTokenUsage('answer', usageMetadata);
 
         sendToRenderer('update-response', finalResponse);
         sendToRenderer('update-status', 'Ready');
@@ -399,7 +468,7 @@ async function generateTextAnswerFromTranscript(transcript, source = 'text') {
     }
 }
 
-async function generateAnswerFromScreenshot(instruction, imageBase64, mimeType = 'image/jpeg') {
+async function generateAnswerFromScreenshot(instruction, imageBase64, mimeType = 'image/jpeg', mode = 'default') {
     if (!geminiTextClient) {
         throw new Error('Gemini text client is not initialized');
     }
@@ -415,6 +484,7 @@ async function generateAnswerFromScreenshot(instruction, imageBase64, mimeType =
 
     const generationId = ++activeTextGenerationId;
     let responseBuffer = '';
+    let usageMetadata = null;
 
     currentTranscription = `[Screenshot Task]: ${normalizedInstruction}\n`;
     sendToRenderer('update-status', 'Analyzing screenshot...');
@@ -427,7 +497,11 @@ async function generateAnswerFromScreenshot(instruction, imageBase64, mimeType =
         let lastError = null;
         let selectedModel = '';
 
-        const prompt = buildScreenshotGenerationPrompt(normalizedInstruction, { forceRussianAnswer });
+        const screenshotMode = normalizeScreenshotMode(mode);
+        const prompt = buildScreenshotGenerationPrompt(normalizedInstruction, {
+            forceRussianAnswer,
+            mode: screenshotMode,
+        });
         const contents = createUserContent([createPartFromBase64(imageBase64, mimeType), { text: prompt }]);
 
         for (const model of modelCandidates) {
@@ -450,7 +524,7 @@ async function generateAnswerFromScreenshot(instruction, imageBase64, mimeType =
             } catch (error) {
                 lastError = error;
                 console.warn(`[Gemini screenshot] Model ${model} failed:`, error?.message || error);
-                if (!isRetryableTextModelError(error)) {
+                if (isQuotaError(error) || !isModelFallbackError(error)) {
                     throw error;
                 }
             }
@@ -460,9 +534,13 @@ async function generateAnswerFromScreenshot(instruction, imageBase64, mimeType =
             throw lastError || new Error('No screenshot-capable Gemini model available');
         }
 
-        console.log('[Gemini screenshot] Selected model:', selectedModel);
+        console.log('[Gemini screenshot] Selected model:', selectedModel, 'mode:', screenshotMode);
 
         for await (const chunk of stream) {
+            if (chunk.usageMetadata) {
+                usageMetadata = chunk.usageMetadata;
+            }
+
             if (generationId !== activeTextGenerationId) {
                 console.log('[Gemini screenshot] Generation superseded, ignoring remaining chunks');
                 return { success: false, error: 'Generation superseded' };
@@ -478,6 +556,7 @@ async function generateAnswerFromScreenshot(instruction, imageBase64, mimeType =
         }
 
         const finalResponse = sanitizeAssistantResponse(responseBuffer);
+        recordTokenUsage('screenshot', usageMetadata);
         if (!finalResponse) {
             sendToRenderer('update-status', 'Error: Empty screenshot response');
             return { success: false, error: 'Empty screenshot response' };
@@ -514,6 +593,7 @@ module.exports.formatSpeakerResults = formatSpeakerResults;
 
 // Audio capture variables
 let systemAudioProc = null;
+let systemAudioBackend = null;
 let messageBuffer = '';
 let systemAudioRestartTimer = null;
 let stopRequestedForSystemAudio = false;
@@ -572,34 +652,7 @@ function getCurrentSessionData() {
 }
 
 async function sendReconnectionContext() {
-    if (activeAudioMode === 'speaker_only' || !global.geminiSessionRef?.current || conversationHistory.length === 0) {
-        return;
-    }
-
-    try {
-        // Gather all transcriptions from the conversation history
-        const transcriptions = conversationHistory
-            .map(turn => turn.transcription)
-            .filter(transcription => transcription && transcription.trim().length > 0);
-
-        if (transcriptions.length === 0) {
-            return;
-        }
-
-        // Create the context message
-        const contextMessage = `Till now all these questions were asked in the interview, answer the last one please:\n\n${transcriptions.join(
-            '\n'
-        )}`;
-
-        console.log('Sending reconnection context with', transcriptions.length, 'previous questions');
-
-        // Send the context message to the new session
-        await global.geminiSessionRef.current.sendRealtimeInput({
-            text: contextMessage,
-        });
-    } catch (error) {
-        console.error('Error sending reconnection context:', error);
-    }
+    console.log('Live session reconnected without resending conversation history');
 }
 
 async function getEnabledTools() {
@@ -700,18 +753,20 @@ function configureInterviewerTranscriptBuffer({ silenceMs, minChars }) {
     interviewerTranscriptBuffer = createInterviewerTranscriptBuffer({
         silenceMs,
         minChars,
-        onUpdate: transcript => {
-            console.log('[Interviewer transcription][partial]', transcript);
+        repairText: normalizeTranscriptForModel,
+        onUpdate: payload => {
+            console.log('[Interviewer transcription][partial]', payload.bestText || payload.rawText || '');
             sendToRenderer('interviewer-transcription', {
-                text: transcript,
+                text: payload.bestText || payload.rawText || '',
                 final: false,
             });
         },
-        onFinalize: async (transcript, reason) => {
+        onFinalize: async (transcript, reason, details = {}) => {
             if (activeAudioMode !== 'speaker_only') {
                 return;
             }
 
+            console.log('[Interviewer transcription][finalize details]', details);
             sendToRenderer('interviewer-transcription', {
                 text: transcript,
                 final: true,
@@ -813,7 +868,6 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         3,
         50
     );
-
     if (activeAudioMode === 'speaker_only') {
         configureInterviewerTranscriptBuffer({
             silenceMs: interviewerSilenceMs,
@@ -853,6 +907,9 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     activeTextGenerationId += 1;
     lastSubmittedText = '';
     lastSubmittedTextAt = 0;
+    textGenerationInProgress = false;
+    queuedTextRequest = null;
+    sessionTokenUsage = createEmptyTokenUsage();
 
     console.log('Gemini text answers enabled:', {
         model: 'gemini-2.0-flash-001',
@@ -888,6 +945,10 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     sendToRenderer('update-status', 'Live session connected');
                 },
                 onmessage: function (message) {
+                    if (message.usageMetadata) {
+                        recordTokenUsage('liveAudio', message.usageMetadata);
+                    }
+
                     const serverContent = message.serverContent;
 
                     if (speakerOnlyMode) {
@@ -1060,53 +1121,34 @@ async function startMacOSAudioCapture(geminiSessionRef, options = {}) {
         systemAudioRestartTimer = null;
     }
 
-    console.log('Starting macOS audio capture with SystemAudioDump...');
+    console.log('Starting macOS system audio capture...');
 
-    const { app } = require('electron');
-    const path = require('path');
-
-    let systemAudioPath;
-    if (app.isPackaged) {
-        systemAudioPath = path.join(process.resourcesPath, 'SystemAudioDump');
-    } else {
-        systemAudioPath = path.join(__dirname, '../assets', 'SystemAudioDump');
-    }
-
-    console.log('SystemAudioDump path:', systemAudioPath);
-
-    // Spawn SystemAudioDump with stealth options
-    const spawnOptions = {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-            ...process.env,
-            // Set environment variables that might help with stealth
-            PROCESS_NAME: 'AudioService',
-            APP_NAME: 'System Audio Service',
-        },
-    };
-
-    // On macOS, apply additional stealth measures
-    if (process.platform === 'darwin') {
-        spawnOptions.detached = false;
-        spawnOptions.windowsHide = false;
-    }
-
-    systemAudioProc = spawn(systemAudioPath, [], spawnOptions);
-
-    if (!systemAudioProc.pid) {
-        console.error('Failed to start SystemAudioDump');
+    try {
+        systemAudioProc = await startCoreAudioTapProcess();
+        systemAudioBackend = 'core_audio_tap';
+        console.log('Core Audio Tap capture started with PID:', systemAudioProc.pid);
+    } catch (error) {
+        console.error('Core Audio Tap failed; ScreenCaptureKit fallback is disabled to protect screen sharing:', error);
+        systemAudioProc = null;
+        systemAudioBackend = null;
         return false;
     }
 
-    console.log('SystemAudioDump started with PID:', systemAudioProc.pid);
+    if (!systemAudioProc.pid) {
+        console.error('Failed to start macOS system audio capture');
+        return false;
+    }
+
+    console.log('macOS audio backend:', systemAudioBackend, 'PID:', systemAudioProc.pid);
 
     const CHUNK_DURATION = 0.1;
     const SAMPLE_RATE = 24000;
     const BYTES_PER_SAMPLE = 2;
-    const CHANNELS = 2;
+    const CHANNELS = 1;
     const CHUNK_SIZE = SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS * CHUNK_DURATION;
 
     let audioBuffer = Buffer.alloc(0);
+    const audioActivityGate = createPcm16AudioActivityGate();
     systemAudioStats = {
         chunks: 0,
         clippedSamples: 0,
@@ -1124,8 +1166,10 @@ async function startMacOSAudioCapture(geminiSessionRef, options = {}) {
 
             const monoChunk = CHANNELS === 2 ? convertStereoToMono(chunk) : chunk;
             trackSystemAudioQuality(monoChunk);
-            const base64Data = monoChunk.toString('base64');
-            sendAudioToGemini(base64Data, geminiSessionRef);
+            for (const activeChunk of audioActivityGate.push(monoChunk)) {
+                const base64Data = activeChunk.toString('base64');
+                sendAudioToGemini(base64Data, geminiSessionRef);
+            }
 
             if (process.env.DEBUG_AUDIO) {
                 console.log(`Processed audio chunk: ${chunk.length} bytes`);
@@ -1141,7 +1185,7 @@ async function startMacOSAudioCapture(geminiSessionRef, options = {}) {
 
     systemAudioProc.stderr.on('data', data => {
         const stderrText = data.toString();
-        console.error('SystemAudioDump stderr:', stderrText);
+        console.error(`[macOS audio][${systemAudioBackend}]`, stderrText);
 
         if (stderrText.includes('Stream was stopped by the system')) {
             scheduleSystemAudioRestart(geminiSessionRef, 'system stopped the stream');
@@ -1149,8 +1193,9 @@ async function startMacOSAudioCapture(geminiSessionRef, options = {}) {
     });
 
     systemAudioProc.on('close', code => {
-        console.log('SystemAudioDump process closed with code:', code);
+        console.log('macOS audio process closed with code:', code, 'backend:', systemAudioBackend);
         systemAudioProc = null;
+        systemAudioBackend = null;
 
         if (!stopRequestedForSystemAudio && code !== 0) {
             scheduleSystemAudioRestart(geminiSessionRef, `process exited with code ${code}`);
@@ -1158,7 +1203,7 @@ async function startMacOSAudioCapture(geminiSessionRef, options = {}) {
     });
 
     systemAudioProc.on('error', err => {
-        console.error('SystemAudioDump process error:', err);
+        console.error('macOS audio process error:', err);
         systemAudioProc = null;
         if (!stopRequestedForSystemAudio) {
             scheduleSystemAudioRestart(geminiSessionRef, err.message || 'process error');
@@ -1248,9 +1293,10 @@ function stopMacOSAudioCapture() {
         systemAudioRestartTimer = null;
     }
     if (systemAudioProc) {
-        console.log('Stopping SystemAudioDump...');
+        console.log('Stopping macOS audio capture:', systemAudioBackend);
         systemAudioProc.kill('SIGTERM');
         systemAudioProc = null;
+        systemAudioBackend = null;
     }
 }
 
@@ -1260,7 +1306,7 @@ function scheduleSystemAudioRestart(geminiSessionRef, reason) {
     }
 
     if (systemAudioRestartAttempts >= MAX_SYSTEM_AUDIO_RESTART_ATTEMPTS) {
-        console.error('SystemAudioDump restart limit reached; not restarting again:', reason);
+        console.error('macOS audio restart limit reached; not restarting again:', reason);
         return;
     }
 
@@ -1270,7 +1316,7 @@ function scheduleSystemAudioRestart(geminiSessionRef, reason) {
 
     systemAudioRestartAttempts += 1;
     console.warn(
-        `Scheduling SystemAudioDump restart ${systemAudioRestartAttempts}/${MAX_SYSTEM_AUDIO_RESTART_ATTEMPTS} after ${SYSTEM_AUDIO_RESTART_DELAY_MS}ms due to: ${reason}`
+        `Scheduling macOS audio restart ${systemAudioRestartAttempts}/${MAX_SYSTEM_AUDIO_RESTART_ATTEMPTS} after ${SYSTEM_AUDIO_RESTART_DELAY_MS}ms due to: ${reason}`
     );
 
     systemAudioRestartTimer = setTimeout(async () => {
@@ -1286,7 +1332,7 @@ function scheduleSystemAudioRestart(geminiSessionRef, reason) {
                 resetRestartAttempts: false,
             });
         } catch (error) {
-            console.error('Failed to restart SystemAudioDump:', error);
+            console.error('Failed to restart macOS audio capture:', error);
         }
     }, SYSTEM_AUDIO_RESTART_DELAY_MS);
 }
@@ -1354,34 +1400,6 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         }
     });
 
-    ipcMain.handle('send-image-content', async (event, { data, debug }) => {
-        if (!geminiSessionRef.current) return { success: false, error: 'No active Gemini session' };
-
-        try {
-            if (!data || typeof data !== 'string') {
-                console.error('Invalid image data received');
-                return { success: false, error: 'Invalid image data' };
-            }
-
-            const buffer = Buffer.from(data, 'base64');
-
-            if (buffer.length < 1000) {
-                console.error(`Image buffer too small: ${buffer.length} bytes`);
-                return { success: false, error: 'Image buffer too small' };
-            }
-
-            process.stdout.write('!');
-            await geminiSessionRef.current.sendRealtimeInput({
-                media: { data: data, mimeType: 'image/jpeg' },
-            });
-
-            return { success: true };
-        } catch (error) {
-            console.error('Error sending image:', error);
-            return { success: false, error: error.message };
-        }
-    });
-
     ipcMain.handle('send-text-message', async (event, text) => {
         try {
             if (!text || typeof text !== 'string' || text.trim().length === 0) {
@@ -1396,7 +1414,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         }
     });
 
-    ipcMain.handle('send-screenshot-prompt', async (event, { instruction, data, mimeType = 'image/jpeg' }) => {
+    ipcMain.handle('send-screenshot-prompt', async (event, { instruction, data, mimeType = 'image/jpeg', mode = 'default' }) => {
         try {
             if (!instruction || typeof instruction !== 'string' || instruction.trim().length === 0) {
                 return { success: false, error: 'Invalid screenshot instruction' };
@@ -1406,7 +1424,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
                 return { success: false, error: 'Invalid screenshot data' };
             }
 
-            return await generateAnswerFromScreenshot(instruction.trim(), data, mimeType);
+            return await generateAnswerFromScreenshot(instruction.trim(), data, mimeType, mode);
         } catch (error) {
             console.error('Error sending screenshot prompt:', error);
             return { success: false, error: error.message };
@@ -1453,6 +1471,8 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
             activeTextGenerationId += 1;
             lastSubmittedText = '';
             lastSubmittedTextAt = 0;
+            textGenerationInProgress = false;
+            queuedTextRequest = null;
 
             // Cleanup any pending resources and stop audio/video capture
             if (geminiSessionRef.current) {
@@ -1522,5 +1542,9 @@ module.exports = {
     normalizeTranscriptForModel,
     needsRussianAnswerRepair,
     buildTextGenerationPrompt,
+    isQuotaError,
+    isModelFallbackError,
+    recordTokenUsage,
+    normalizeScreenshotMode,
     buildScreenshotGenerationPrompt,
 };

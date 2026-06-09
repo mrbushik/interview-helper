@@ -23,6 +23,8 @@ export class AppHeader extends LitElement {
             font-size: var(--header-font-size);
             font-weight: 600;
             -webkit-app-region: drag;
+            position: relative;
+            min-width: 0;
         }
 
         .header-actions {
@@ -74,8 +76,105 @@ export class AppHeader extends LitElement {
             background: var(--hover-background);
         }
 
+        .mode-picker {
+            position: relative;
+            display: inline-flex;
+            -webkit-app-region: no-drag;
+        }
+
+        .mode-trigger {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            max-width: 180px;
+            background: var(--button-background);
+            color: var(--text-color);
+            border: 1px solid var(--button-border);
+            padding: var(--header-button-padding);
+            border-radius: 8px;
+            font-size: var(--header-font-size-small);
+            font-weight: 500;
+        }
+
+        .mode-trigger:hover,
+        .mode-trigger[aria-expanded='true'] {
+            background: var(--hover-background);
+        }
+
+        .mode-trigger-label {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .mode-trigger svg {
+            width: 12px;
+            height: 12px;
+            flex: 0 0 auto;
+            transition: transform 0.15s ease;
+        }
+
+        .mode-trigger[aria-expanded='true'] svg {
+            transform: rotate(180deg);
+        }
+
+        .mode-menu {
+            position: absolute;
+            z-index: 20;
+            top: calc(100% + 6px);
+            left: 0;
+            width: 190px;
+            display: grid;
+            gap: 3px;
+            padding: 5px;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: var(--header-background);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+            -webkit-app-region: no-drag;
+        }
+
+        .mode-option {
+            width: 100%;
+            padding: 8px 10px;
+            border: 0;
+            border-radius: 7px;
+            background: transparent;
+            color: var(--header-actions-color);
+            font-size: var(--header-font-size-small);
+            text-align: left;
+        }
+
+        .mode-option:hover {
+            color: var(--text-color);
+            background: var(--hover-background);
+        }
+
+        .mode-option.active {
+            color: var(--text-color);
+            background: var(--button-background);
+        }
+
+        .click-through-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            white-space: nowrap;
+        }
+
+        .click-through-indicator::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #54d98c;
+            box-shadow: 0 0 0 2px rgba(84, 217, 140, 0.16);
+        }
+
         :host([isclickthrough]) .button:hover,
-        :host([isclickthrough]) .icon-button:hover {
+        :host([isclickthrough]) .icon-button:hover,
+        :host([isclickthrough]) .mode-trigger:hover,
+        :host([isclickthrough]) .mode-option:hover {
             background: transparent;
         }
 
@@ -101,6 +200,8 @@ export class AppHeader extends LitElement {
         isClickThrough: { type: Boolean, reflect: true },
         advancedMode: { type: Boolean },
         onAdvancedClick: { type: Function },
+        screenshotMode: { type: String, state: true },
+        modeMenuOpen: { type: Boolean, state: true },
     };
 
     constructor() {
@@ -117,17 +218,34 @@ export class AppHeader extends LitElement {
         this.isClickThrough = false;
         this.advancedMode = false;
         this.onAdvancedClick = () => {};
+        this.screenshotMode = this.normalizeScreenshotMode(localStorage.getItem('screenshotMode'));
+        this.modeMenuOpen = false;
         this._timerInterval = null;
+        this._handleDocumentPointerDown = event => {
+            if (this.modeMenuOpen && !event.composedPath().includes(this)) {
+                this.modeMenuOpen = false;
+            }
+        };
+        this._handleDocumentKeyDown = event => {
+            if (event.key === 'Escape') {
+                this.modeMenuOpen = false;
+            }
+        };
     }
 
     connectedCallback() {
         super.connectedCallback();
         this._startTimer();
+        document.addEventListener('pointerdown', this._handleDocumentPointerDown);
+        document.addEventListener('keydown', this._handleDocumentKeyDown);
+        this.syncClickThroughState();
     }
 
     disconnectedCallback() {
         super.disconnectedCallback();
         this._stopTimer();
+        document.removeEventListener('pointerdown', this._handleDocumentPointerDown);
+        document.removeEventListener('keydown', this._handleDocumentKeyDown);
     }
 
     updated(changedProperties) {
@@ -198,15 +316,119 @@ export class AppHeader extends LitElement {
         return navigationViews.includes(this.currentView);
     }
 
+    normalizeScreenshotMode(mode) {
+        return ['default', 'live_coding', 'code_review', 'console_output'].includes(mode) ? mode : 'default';
+    }
+
+    getScreenshotModeLabel() {
+        const labels = {
+            default: 'Default',
+            live_coding: 'Live Coding',
+            code_review: 'Code Review',
+            console_output: 'Console Output',
+        };
+        return labels[this.screenshotMode] || labels.default;
+    }
+
+    setScreenshotMode(mode) {
+        this.screenshotMode = this.normalizeScreenshotMode(mode);
+        localStorage.setItem('screenshotMode', this.screenshotMode);
+        this.modeMenuOpen = false;
+        this.setClickThrough(true);
+    }
+
+    async setClickThrough(enabled) {
+        if (!window.require) {
+            return;
+        }
+
+        try {
+            const { ipcRenderer } = window.require('electron');
+            await ipcRenderer.invoke('set-click-through', enabled);
+        } catch (error) {
+            console.error('Failed to update click-through state:', error);
+        }
+    }
+
+    async syncClickThroughState() {
+        if (!window.require) {
+            return;
+        }
+
+        try {
+            const { ipcRenderer } = window.require('electron');
+            const result = await ipcRenderer.invoke('get-click-through-state');
+            if (result?.success) {
+                this.isClickThrough = result.enabled;
+            }
+        } catch (error) {
+            console.error('Failed to read click-through state:', error);
+        }
+    }
+
+    async toggleModeMenu() {
+        if (!this.modeMenuOpen) {
+            await this.setClickThrough(false);
+        }
+        this.modeMenuOpen = !this.modeMenuOpen;
+    }
+
+    renderScreenshotModePicker() {
+        const modes = [
+            ['default', 'Default'],
+            ['live_coding', 'Live Coding'],
+            ['code_review', 'Code Review'],
+            ['console_output', 'Console Output'],
+        ];
+
+        return html`
+            <div class="mode-picker">
+                <button
+                    class="mode-trigger"
+                    aria-label="Screenshot answer mode"
+                    aria-haspopup="menu"
+                    aria-expanded=${this.modeMenuOpen}
+                    @click=${this.toggleModeMenu}
+                >
+                    <span class="mode-trigger-label">Mode: ${this.getScreenshotModeLabel()}</span>
+                    <svg viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                        <path d="M2.5 4.5L6 8L9.5 4.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"></path>
+                    </svg>
+                </button>
+                ${this.modeMenuOpen
+                    ? html`
+                          <div class="mode-menu" role="menu">
+                              ${modes.map(
+                                  ([value, label]) => html`
+                                      <button
+                                          class="mode-option ${this.screenshotMode === value ? 'active' : ''}"
+                                          role="menuitemradio"
+                                          aria-checked=${this.screenshotMode === value}
+                                          @click=${() => this.setScreenshotMode(value)}
+                                      >
+                                          ${label}
+                                      </button>
+                                  `
+                              )}
+                          </div>
+                      `
+                    : ''}
+            </div>
+        `;
+    }
+
     render() {
         const elapsedTime = this.getElapsedTime();
 
         return html`
             <div class="header">
-                <div class="header-title">${this.getViewTitle()}</div>
+                <div class="header-title">
+                    ${this.currentView === 'assistant' ? this.renderScreenshotModePicker() : this.getViewTitle()}
+                </div>
                 <div class="header-actions">
                     ${this.currentView === 'assistant'
                         ? html`
+                              ${this.isClickThrough ? html`<span class="click-through-indicator">Pass-through</span>` : ''}
                               <span>${elapsedTime}</span>
                               <span>${this.statusText}</span>
                           `

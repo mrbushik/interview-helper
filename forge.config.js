@@ -4,7 +4,10 @@ const { FuseV1Options, FuseVersion } = require('@electron/fuses');
 module.exports = {
     packagerConfig: {
         asar: true,
-        extraResource: ['./src/assets/SystemAudioDump', './src/native/MacOSMicTranscriber.swift'],
+        extraResource: [
+            './src/native/CoreAudioTapCapture.swift',
+            './src/native/MacOSMicTranscriber.swift',
+        ],
         name: 'Cheating Daddy',
         icon: 'src/assets/logo',
         extendInfo: {

@@ -127,7 +127,7 @@ export class CheatingDaddyApp extends LitElement {
         this.selectedProfile = localStorage.getItem('selectedProfile') || 'interview';
         this.selectedLanguage = localStorage.getItem('selectedLanguage') || 'en-US';
         this.isListening = false;
-        this.selectedScreenshotInterval = localStorage.getItem('selectedScreenshotInterval') || '5';
+        this.selectedScreenshotInterval = 'manual';
         this.selectedImageQuality = localStorage.getItem('selectedImageQuality') || 'medium';
         this.layoutMode = localStorage.getItem('layoutMode') || 'normal';
         this.advancedMode = localStorage.getItem('advancedMode') === 'true';
@@ -244,6 +244,7 @@ export class CheatingDaddyApp extends LitElement {
             // Close the session
             if (window.require) {
                 const { ipcRenderer } = window.require('electron');
+                await ipcRenderer.invoke('set-click-through', false);
                 await ipcRenderer.invoke('close-session');
             }
             this.sessionActive = false;
@@ -280,7 +281,7 @@ export class CheatingDaddyApp extends LitElement {
         }
 
         await cheddar.initializeGemini(this.selectedProfile, this.selectedLanguage);
-        // Pass the screenshot interval as string (including 'manual' option)
+        // Screen capture is manual-only to avoid a persistent display stream.
         cheddar.startCapture(this.selectedScreenshotInterval, this.selectedImageQuality);
         this.sessionActive = true;
         this.isListening = true;

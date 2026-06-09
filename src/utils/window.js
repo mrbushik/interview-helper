@@ -9,6 +9,32 @@ let windowResizing = false;
 let resizeAnimation = null;
 const RESIZE_ANIMATION_DURATION = 500; // milliseconds
 
+function setClickThrough(mainWindow, enabled) {
+    const nextState = Boolean(enabled);
+
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        mouseEventsIgnored = false;
+        return mouseEventsIgnored;
+    }
+
+    mouseEventsIgnored = nextState;
+    if (mouseEventsIgnored) {
+        mainWindow.setIgnoreMouseEvents(true, { forward: true });
+        mainWindow.setFocusable(false);
+        console.log('Click-through enabled');
+    } else {
+        mainWindow.setIgnoreMouseEvents(false);
+        mainWindow.setFocusable(true);
+        console.log('Click-through disabled');
+    }
+
+    if (!mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send('click-through-toggled', mouseEventsIgnored);
+    }
+
+    return mouseEventsIgnored;
+}
+
 function ensureDataDirectories() {
     const homeDir = os.homedir();
     const cheddarDir = path.join(homeDir, 'cheddar');
@@ -51,14 +77,16 @@ function createWindow(sendToRenderer, geminiSessionRef, randomNames = null) {
     });
 
     const { session, desktopCapturer } = require('electron');
-    session.defaultSession.setDisplayMediaRequestHandler(
-        (request, callback) => {
-            desktopCapturer.getSources({ types: ['screen'] }).then(sources => {
-                callback({ video: sources[0], audio: 'loopback' });
-            });
-        },
-        { useSystemPicker: true }
-    );
+    if (process.platform !== 'darwin') {
+        session.defaultSession.setDisplayMediaRequestHandler(
+            (request, callback) => {
+                desktopCapturer.getSources({ types: ['screen'] }).then(sources => {
+                    callback({ video: sources[0], audio: 'loopback' });
+                });
+            },
+            { useSystemPicker: true }
+        );
+    }
 
     mainWindow.setResizable(false);
     mainWindow.setContentProtection(true);
@@ -114,20 +142,21 @@ function createWindow(sendToRenderer, geminiSessionRef, randomNames = null) {
                         keybinds = { ...defaultKeybinds, ...savedSettings.keybinds };
                     }
 
-                    // Apply content protection setting via IPC handler
-                    try {
-                        const contentProtection = await mainWindow.webContents.executeJavaScript('cheddar.getContentProtection()');
-                        mainWindow.setContentProtection(contentProtection);
-                        console.log('Content protection loaded from settings:', contentProtection);
-                    } catch (error) {
-                        console.error('Error loading content protection:', error);
-                        mainWindow.setContentProtection(true);
+                    if (process.platform !== 'darwin') {
+                        try {
+                            const contentProtection = await mainWindow.webContents.executeJavaScript('cheddar.getContentProtection()');
+                            mainWindow.setContentProtection(contentProtection);
+                            console.log('Content protection loaded from settings:', contentProtection);
+                        } catch (error) {
+                            console.error('Error loading content protection:', error);
+                            mainWindow.setContentProtection(true);
+                        }
                     }
 
                     updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessionRef);
                 })
                 .catch(() => {
-                    // Default to content protection enabled
+                    // Default to content protection enabled.
                     mainWindow.setContentProtection(true);
                     updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessionRef);
                 });
@@ -146,6 +175,10 @@ function getDefaultKeybinds() {
         moveDown: isMac ? 'Alt+Down' : 'Ctrl+Down',
         moveLeft: isMac ? 'Alt+Left' : 'Ctrl+Left',
         moveRight: isMac ? 'Alt+Right' : 'Ctrl+Right',
+        decreaseWidth: 'Alt+Shift+Left',
+        increaseWidth: 'Alt+Shift+Right',
+        decreaseHeight: 'Alt+Shift+Up',
+        increaseHeight: 'Alt+Shift+Down',
         toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
         toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
         nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
@@ -205,6 +238,41 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
         }
     });
 
+    const resizeIncrement = 50;
+    const minWindowWidth = 420;
+    const minWindowHeight = 300;
+    const resizeActions = {
+        decreaseWidth: () => resizeWindow(-resizeIncrement, 0),
+        increaseWidth: () => resizeWindow(resizeIncrement, 0),
+        decreaseHeight: () => resizeWindow(0, -resizeIncrement),
+        increaseHeight: () => resizeWindow(0, resizeIncrement),
+    };
+
+    function resizeWindow(widthDelta, heightDelta) {
+        if (!mainWindow.isVisible()) return;
+
+        const [currentWidth, currentHeight] = mainWindow.getSize();
+        const display = screen.getDisplayMatching(mainWindow.getBounds());
+        const maxWidth = display.workAreaSize.width;
+        const maxHeight = display.workAreaSize.height;
+        const nextWidth = Math.max(minWindowWidth, Math.min(maxWidth, currentWidth + widthDelta));
+        const nextHeight = Math.max(minWindowHeight, Math.min(maxHeight, currentHeight + heightDelta));
+
+        mainWindow.setSize(nextWidth, nextHeight);
+    }
+
+    Object.entries(resizeActions).forEach(([action, handler]) => {
+        const keybind = keybinds[action];
+        if (!keybind) return;
+
+        try {
+            globalShortcut.register(keybind, handler);
+            console.log(`Registered ${action}: ${keybind}`);
+        } catch (error) {
+            console.error(`Failed to register ${action} (${keybind}):`, error);
+        }
+    });
+
     // Register toggle visibility shortcut
     if (keybinds.toggleVisibility) {
         try {
@@ -225,15 +293,7 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
     if (keybinds.toggleClickThrough) {
         try {
             globalShortcut.register(keybinds.toggleClickThrough, () => {
-                mouseEventsIgnored = !mouseEventsIgnored;
-                if (mouseEventsIgnored) {
-                    mainWindow.setIgnoreMouseEvents(true, { forward: true });
-                    console.log('Mouse events ignored');
-                } else {
-                    mainWindow.setIgnoreMouseEvents(false);
-                    console.log('Mouse events enabled');
-                }
-                mainWindow.webContents.send('click-through-toggled', mouseEventsIgnored);
+                setClickThrough(mainWindow, !mouseEventsIgnored);
             });
             console.log(`Registered toggleClickThrough: ${keybinds.toggleClickThrough}`);
         } catch (error) {
@@ -366,8 +426,59 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
 
 function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
     ipcMain.on('view-changed', (event, view) => {
-        if (view !== 'assistant' && !mainWindow.isDestroyed()) {
-            mainWindow.setIgnoreMouseEvents(false);
+        setClickThrough(mainWindow, view === 'assistant');
+    });
+
+    ipcMain.handle('set-click-through', (event, enabled) => {
+        return { success: true, enabled: setClickThrough(mainWindow, enabled) };
+    });
+
+    ipcMain.handle('get-click-through-state', () => {
+        return { success: true, enabled: mouseEventsIgnored };
+    });
+
+    ipcMain.handle('capture-screen-thumbnail', async (event, imageQuality = 'medium') => {
+        if (mainWindow.isDestroyed()) {
+            return { success: false, error: 'Window has been destroyed' };
+        }
+
+        try {
+            const display = screen.getDisplayMatching(mainWindow.getBounds());
+            const scaleFactor = display.scaleFactor || 1;
+            const thumbnailSize = {
+                width: Math.max(1, Math.round(display.size.width * scaleFactor)),
+                height: Math.max(1, Math.round(display.size.height * scaleFactor)),
+            };
+            const sources = await desktopCapturer.getSources({
+                types: ['screen'],
+                thumbnailSize,
+                fetchWindowIcons: false,
+            });
+            const source =
+                sources.find(candidate => String(candidate.display_id) === String(display.id)) ||
+                sources[0];
+
+            if (!source || source.thumbnail.isEmpty()) {
+                return { success: false, error: 'No screen image was available' };
+            }
+
+            const jpegQuality = {
+                high: 90,
+                medium: 70,
+                low: 50,
+            }[imageQuality] || 70;
+            const size = source.thumbnail.getSize();
+
+            return {
+                success: true,
+                data: source.thumbnail.toJPEG(jpegQuality).toString('base64'),
+                mimeType: 'image/jpeg',
+                width: size.width,
+                height: size.height,
+            };
+        } catch (error) {
+            console.error('Failed to capture screen thumbnail:', error);
+            return { success: false, error: error.message };
         }
     });
 
@@ -559,6 +670,7 @@ module.exports = {
     ensureDataDirectories,
     createWindow,
     getDefaultKeybinds,
+    setClickThrough,
     updateGlobalShortcuts,
     setupWindowIpcHandlers,
 };

@@ -422,7 +422,7 @@ export class CustomizeView extends LitElement {
         super();
         this.selectedProfile = 'interview';
         this.selectedLanguage = 'en-US';
-        this.selectedScreenshotInterval = '5';
+        this.selectedScreenshotInterval = 'manual';
         this.selectedImageQuality = 'medium';
         this.layoutMode = 'normal';
         this.keybinds = this.getDefaultKeybinds();
@@ -591,12 +591,16 @@ export class CustomizeView extends LitElement {
     }
 
     getDefaultKeybinds() {
-        const isMac = cheddar.isMacOS || navigator.platform.includes('Mac');
+        const isMac = window.cheddar?.isMacOS || navigator.platform.includes('Mac');
         return {
             moveUp: isMac ? 'Alt+Up' : 'Ctrl+Up',
             moveDown: isMac ? 'Alt+Down' : 'Ctrl+Down',
             moveLeft: isMac ? 'Alt+Left' : 'Ctrl+Left',
             moveRight: isMac ? 'Alt+Right' : 'Ctrl+Right',
+            decreaseWidth: 'Alt+Shift+Left',
+            increaseWidth: 'Alt+Shift+Right',
+            decreaseHeight: 'Alt+Shift+Up',
+            increaseHeight: 'Alt+Shift+Down',
             toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
             toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
             nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
@@ -666,6 +670,26 @@ export class CustomizeView extends LitElement {
                 key: 'moveRight',
                 name: 'Move Window Right',
                 description: 'Move the application window right',
+            },
+            {
+                key: 'decreaseWidth',
+                name: 'Decrease Window Width',
+                description: 'Make the application window narrower',
+            },
+            {
+                key: 'increaseWidth',
+                name: 'Increase Window Width',
+                description: 'Make the application window wider',
+            },
+            {
+                key: 'decreaseHeight',
+                name: 'Decrease Window Height',
+                description: 'Make the application window shorter',
+            },
+            {
+                key: 'increaseHeight',
+                name: 'Increase Window Height',
+                description: 'Make the application window taller',
             },
             {
                 key: 'toggleVisibility',
@@ -994,9 +1018,7 @@ export class CustomizeView extends LitElement {
                                 data-context-key="vacancyContext"
                                 @input=${this.handleInterviewContextInput}
                             ></textarea>
-                            <div class="form-description">
-                                Used to align HR and technical answers with the exact role requirements.
-                            </div>
+                            <div class="form-description">Used to align HR and technical answers with the exact role requirements.</div>
                         </div>
                     </div>
                 </div>
@@ -1009,14 +1031,16 @@ export class CustomizeView extends LitElement {
                     <div class="form-grid">
                         <div class="form-group">
                             <label class="form-label">Audio Mode</label>
-                            <select class="form-control" .value=${localStorage.getItem('audioMode') || 'speaker_only'} @change=${e => localStorage.setItem('audioMode', e.target.value)}>
+                            <select
+                                class="form-control"
+                                .value=${localStorage.getItem('audioMode') || 'speaker_only'}
+                                @change=${e => localStorage.setItem('audioMode', e.target.value)}
+                            >
                                 <option value="speaker_only">Speaker Only (Interviewer)</option>
                                 <option value="mic_only">Microphone Only (Me)</option>
                                 <option value="both">Both Speaker & Microphone</option>
                             </select>
-                            <div class="form-description">
-                                Choose which audio sources to capture for the AI.
-                            </div>
+                            <div class="form-description">Choose which audio sources to capture for the AI.</div>
                         </div>
                         <div class="form-group">
                             <label class="form-label">Interviewer End-of-Speech Pause</label>
@@ -1048,25 +1072,28 @@ export class CustomizeView extends LitElement {
                                 Ignores short acknowledgements and accidental audio fragments. Applied when the next session starts.
                             </div>
                         </div>
-                        ${cheddar.isMacOS
-                            ? html`
-                                  <div class="form-group">
-                                      <label class="form-label">Native Mic Transcription</label>
-                                      <div class="checkbox-group">
-                                          <input
-                                              class="checkbox-input"
-                                              type="checkbox"
-                                              .checked=${localStorage.getItem('useNativeMacOSMicTranscription') === 'true'}
-                                              @change=${this.handleNativeMacOSMicTranscriptionChange}
-                                          />
-                                          <label class="checkbox-label">Use macOS Speech framework for microphone transcription</label>
+                        ${
+                            window.cheddar?.isMacOS
+                                ? html`
+                                      <div class="form-group">
+                                          <label class="form-label">Native Mic Transcription</label>
+                                          <div class="checkbox-group">
+                                              <input
+                                                  class="checkbox-input"
+                                                  type="checkbox"
+                                                  .checked=${localStorage.getItem('useNativeMacOSMicTranscription') === 'true'}
+                                                  @change=${this.handleNativeMacOSMicTranscriptionChange}
+                                              />
+                                              <label class="checkbox-label">Use macOS Speech framework for microphone transcription</label>
+                                          </div>
+                                          <div class="form-description">
+                                              Uses the Mac speech engine for live microphone transcription and logs partial/final text in the
+                                              terminal.
+                                          </div>
                                       </div>
-                                      <div class="form-description">
-                                          Uses the Mac speech engine for live microphone transcription and logs partial/final text in the terminal.
-                                      </div>
-                                  </div>
-                              `
-                            : ''}
+                                  `
+                                : ''
+                        }
                     </div>
                 </div>
 
@@ -1078,11 +1105,15 @@ export class CustomizeView extends LitElement {
                     <div class="form-grid">
                         <div class="form-group">
                             <label class="form-label">Profile</label>
-                            <select class="form-control" .value=${localStorage.getItem('stealthProfile') || 'balanced'} @change=${e => {
-                                localStorage.setItem('stealthProfile', e.target.value);
-                                // We need to notify the main process to restart for some settings to apply
-                                alert('Restart the application for stealth changes to take full effect.');
-                            }}>
+                            <select
+                                class="form-control"
+                                .value=${localStorage.getItem('stealthProfile') || 'balanced'}
+                                @change=${e => {
+                                    localStorage.setItem('stealthProfile', e.target.value);
+                                    // We need to notify the main process to restart for some settings to apply
+                                    alert('Restart the application for stealth changes to take full effect.');
+                                }}
+                            >
                                 <option value="visible">Visible</option>
                                 <option value="balanced">Balanced</option>
                                 <option value="ultra">Ultra-Stealth</option>
@@ -1093,7 +1124,6 @@ export class CustomizeView extends LitElement {
                         </div>
                     </div>
                 </div>
-
 
                 <!-- Language & Audio Section -->
                 <div class="settings-section">
@@ -1131,7 +1161,8 @@ export class CustomizeView extends LitElement {
                                     <label class="checkbox-label">Always answer in Russian</label>
                                 </div>
                                 <div class="form-description">
-                                    Keeps recognized speech language unchanged, but asks Gemini to return all answers in Russian with English technical terms preserved.
+                                    Keeps recognized speech language unchanged, but asks Gemini to return all answers in Russian with English
+                                    technical terms preserved.
                                 </div>
                             </div>
                         </div>
@@ -1184,9 +1215,7 @@ export class CustomizeView extends LitElement {
                                     <span>Transparent</span>
                                     <span>Opaque</span>
                                 </div>
-                                <div class="form-description">
-                                    Adjust the transparency of the interface background elements
-                                </div>
+                                <div class="form-description">Adjust the transparency of the interface background elements</div>
                             </div>
                         </div>
 
@@ -1209,13 +1238,9 @@ export class CustomizeView extends LitElement {
                                     <span>12px</span>
                                     <span>32px</span>
                                 </div>
-                                <div class="form-description">
-                                    Adjust the font size of AI response text in the assistant view
-                                </div>
+                                <div class="form-description">Adjust the font size of AI response text in the assistant view</div>
                             </div>
                         </div>
-
-
                     </div>
                 </div>
 
@@ -1229,24 +1254,13 @@ export class CustomizeView extends LitElement {
                         <div class="form-row">
                             <div class="form-group">
                                 <label class="form-label">
-                                    Capture Interval
-                                    <span class="current-selection"
-                                        >${this.selectedScreenshotInterval === 'manual' ? 'Manual' : this.selectedScreenshotInterval + 's'}</span
-                                    >
+                                    Screen Capture
+                                    <span class="current-selection">Manual</span>
                                 </label>
-                                <select class="form-control" .value=${this.selectedScreenshotInterval} @change=${this.handleScreenshotIntervalSelect}>
-                                    <option value="manual" ?selected=${this.selectedScreenshotInterval === 'manual'}>Manual (On demand)</option>
-                                    <option value="1" ?selected=${this.selectedScreenshotInterval === '1'}>Every 1 second</option>
-                                    <option value="2" ?selected=${this.selectedScreenshotInterval === '2'}>Every 2 seconds</option>
-                                    <option value="5" ?selected=${this.selectedScreenshotInterval === '5'}>Every 5 seconds</option>
-                                    <option value="10" ?selected=${this.selectedScreenshotInterval === '10'}>Every 10 seconds</option>
-                                </select>
+                                <div class="form-control">Cmd/Ctrl + Enter</div>
                                 <div class="form-description">
-                                    ${
-                                        this.selectedScreenshotInterval === 'manual'
-                                            ? 'Screenshots will only be taken when you use the "Ask Next Step" or "New Context" shortcut'
-                                            : 'Automatic screenshots will be taken at the specified interval'
-                                    }
+                                    Screenshots are taken only when you use the "Ask Next Step" or "New Context" shortcut. No persistent screen stream
+                                    is kept open.
                                 </div>
                             </div>
 
@@ -1324,8 +1338,6 @@ export class CustomizeView extends LitElement {
                     </table>
                 </div>
 
-
-
                 <!-- Google Search Section -->
                 <div class="settings-section">
                     <div class="section-title">
@@ -1355,27 +1367,30 @@ export class CustomizeView extends LitElement {
                 </div>
 
                 <!-- Advanced Mode Section (Danger Zone) -->
-                <div class="settings-section" style="border-color: var(--danger-border, rgba(239, 68, 68, 0.3)); background: var(--danger-background, rgba(239, 68, 68, 0.05));">
+                <div
+                    class="settings-section"
+                    style="border-color: var(--danger-border, rgba(239, 68, 68, 0.3)); background: var(--danger-background, rgba(239, 68, 68, 0.05));"
+                >
                     <div class="section-title" style="color: var(--danger-color, #ef4444);">
                         <span>⚠️ Advanced Mode</span>
                     </div>
 
                     <div class="form-grid">
                         <div class="checkbox-group">
-                                <input
-                                    type="checkbox"
-                                    class="checkbox-input"
-                                    id="advanced-mode"
-                                    .checked=${this.advancedMode}
-                                    @change=${this.handleAdvancedModeChange}
-                                />
-                                <label for="advanced-mode" class="checkbox-label"> Enable Advanced Mode </label>
-                            </div>
-                            <div class="form-description" style="margin-left: 24px; margin-top: -8px;">
-                                Unlock experimental features, developer tools, and advanced configuration options
-                                <br /><strong>Note:</strong> Advanced mode adds a new icon to the main navigation bar
-                            </div>
+                            <input
+                                type="checkbox"
+                                class="checkbox-input"
+                                id="advanced-mode"
+                                .checked=${this.advancedMode}
+                                @change=${this.handleAdvancedModeChange}
+                            />
+                            <label for="advanced-mode" class="checkbox-label"> Enable Advanced Mode </label>
                         </div>
+                        <div class="form-description" style="margin-left: 24px; margin-top: -8px;">
+                            Unlock experimental features, developer tools, and advanced configuration options
+                            <br /><strong>Note:</strong> Advanced mode adds a new icon to the main navigation bar
+                        </div>
+                    </div>
                     </div>
                 </div>
             </div>

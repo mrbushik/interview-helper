@@ -23,8 +23,8 @@ export class AssistantView extends LitElement {
             background: var(--main-content-background);
             padding: 16px;
             scroll-behavior: smooth;
-            user-select: text;
-            cursor: text;
+            user-select: none;
+            cursor: default;
         }
 
         .interviewer-transcript {
@@ -48,14 +48,12 @@ export class AssistantView extends LitElement {
         }
 
         /* Allow text selection for all content within the response container */
-        .response-container * {
+        .response-container.has-response {
             user-select: text;
-            cursor: text;
         }
 
-        /* Restore default cursor for interactive elements */
-        .response-container a {
-            cursor: pointer;
+        .response-container.has-response * {
+            user-select: text;
         }
 
         /* Animated word-by-word reveal */
@@ -296,7 +294,6 @@ export class AssistantView extends LitElement {
             width: 36px;
             height: 36px;
             justify-content: center;
-            cursor: pointer;
         }
 
         .save-button:hover {
@@ -709,7 +706,7 @@ export class AssistantView extends LitElement {
                       </div>
                   `
                 : ''}
-            <div class="response-container" id="responseContainer"></div>
+            <div class="response-container ${this.responses.length > 0 && this.currentResponseIndex >= 0 ? 'has-response' : ''}" id="responseContainer"></div>
 
             <div class="text-input-container">
                 <button class="nav-button" @click=${this.navigateToPreviousResponse} ?disabled=${this.currentResponseIndex <= 0}>

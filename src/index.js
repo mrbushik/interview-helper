@@ -173,11 +173,12 @@ function setupGeneralIpcHandlers() {
     ipcMain.handle('update-content-protection', async (event, contentProtection) => {
         try {
             if (mainWindow) {
-
-                // Get content protection setting from localStorage via cheddar
-                const contentProtection = await mainWindow.webContents.executeJavaScript('cheddar.getContentProtection()');
-                mainWindow.setContentProtection(contentProtection);
-                console.log('Content protection updated:', contentProtection);
+                const enabled =
+                    process.platform === 'darwin'
+                        ? true
+                        : await mainWindow.webContents.executeJavaScript('cheddar.getContentProtection()');
+                mainWindow.setContentProtection(enabled);
+                console.log('Content protection updated:', enabled);
             }
             return { success: true };
         } catch (error) {

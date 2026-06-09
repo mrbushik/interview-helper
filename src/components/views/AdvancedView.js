@@ -323,9 +323,6 @@ export class AdvancedView extends LitElement {
         isClearing: { type: Boolean },
         statusMessage: { type: String },
         statusType: { type: String },
-        throttleTokens: { type: Boolean },
-        maxTokensPerMin: { type: Number },
-        throttleAtPercent: { type: Number },
         contentProtection: { type: Boolean },
     };
 
@@ -335,15 +332,9 @@ export class AdvancedView extends LitElement {
         this.statusMessage = '';
         this.statusType = '';
 
-        // Rate limiting defaults
-        this.throttleTokens = true;
-        this.maxTokensPerMin = 1000000;
-        this.throttleAtPercent = 75;
-
         // Content protection default
         this.contentProtection = true;
 
-        this.loadRateLimitSettings();
         this.loadContentProtectionSetting();
     }
 
@@ -415,57 +406,6 @@ export class AdvancedView extends LitElement {
         }
     }
 
-    // Rate limiting methods
-    loadRateLimitSettings() {
-        const throttleTokens = localStorage.getItem('throttleTokens');
-        const maxTokensPerMin = localStorage.getItem('maxTokensPerMin');
-        const throttleAtPercent = localStorage.getItem('throttleAtPercent');
-
-        if (throttleTokens !== null) {
-            this.throttleTokens = throttleTokens === 'true';
-        }
-        if (maxTokensPerMin !== null) {
-            this.maxTokensPerMin = parseInt(maxTokensPerMin, 10) || 1000000;
-        }
-        if (throttleAtPercent !== null) {
-            this.throttleAtPercent = parseInt(throttleAtPercent, 10) || 75;
-        }
-    }
-
-    handleThrottleTokensChange(e) {
-        this.throttleTokens = e.target.checked;
-        localStorage.setItem('throttleTokens', this.throttleTokens.toString());
-        this.requestUpdate();
-    }
-
-    handleMaxTokensChange(e) {
-        const value = parseInt(e.target.value, 10);
-        if (!isNaN(value) && value > 0) {
-            this.maxTokensPerMin = value;
-            localStorage.setItem('maxTokensPerMin', this.maxTokensPerMin.toString());
-        }
-    }
-
-    handleThrottlePercentChange(e) {
-        const value = parseInt(e.target.value, 10);
-        if (!isNaN(value) && value >= 0 && value <= 100) {
-            this.throttleAtPercent = value;
-            localStorage.setItem('throttleAtPercent', this.throttleAtPercent.toString());
-        }
-    }
-
-    resetRateLimitSettings() {
-        this.throttleTokens = true;
-        this.maxTokensPerMin = 1000000;
-        this.throttleAtPercent = 75;
-
-        localStorage.removeItem('throttleTokens');
-        localStorage.removeItem('maxTokensPerMin');
-        localStorage.removeItem('throttleAtPercent');
-
-        this.requestUpdate();
-    }
-
     // Content protection methods
     loadContentProtectionSetting() {
         const contentProtection = localStorage.getItem('contentProtection');
@@ -475,7 +415,7 @@ export class AdvancedView extends LitElement {
     async handleContentProtectionChange(e) {
         this.contentProtection = e.target.checked;
         localStorage.setItem('contentProtection', this.contentProtection.toString());
-        
+
         // Update the window's content protection in real-time
         if (window.require) {
             const { ipcRenderer } = window.require('electron');
@@ -485,11 +425,9 @@ export class AdvancedView extends LitElement {
                 console.error('Failed to update content protection:', error);
             }
         }
-        
+
         this.requestUpdate();
     }
-
-
 
     render() {
         return html`
@@ -500,8 +438,8 @@ export class AdvancedView extends LitElement {
                         <span>🔒 Content Protection</span>
                     </div>
                     <div class="advanced-description">
-                        Content protection makes the application window invisible to screen sharing and recording software. 
-                        This is useful for privacy when sharing your screen, but may interfere with certain display setups like DisplayLink.
+                        Content protection makes the application window invisible to screen sharing and recording software. It is enabled by default,
+                        but support depends on the operating system and the screen-sharing application.
                     </div>
 
                     <div class="form-grid">
@@ -513,91 +451,15 @@ export class AdvancedView extends LitElement {
                                 .checked=${this.contentProtection}
                                 @change=${this.handleContentProtectionChange}
                             />
-                            <label for="content-protection" class="checkbox-label">
-                                Enable content protection (stealth mode)
-                            </label>
+                            <label for="content-protection" class="checkbox-label"> Enable content protection (stealth mode) </label>
                         </div>
                         <div class="form-description" style="margin-left: 22px;">
-                            ${this.contentProtection 
-                                ? 'The application is currently invisible to screen sharing and recording software.' 
+                            ${this.contentProtection
+                                ? 'The application is currently invisible to screen sharing and recording software.'
                                 : 'The application is currently visible to screen sharing and recording software.'}
                         </div>
                     </div>
                 </div>
-
-                <!-- Rate Limiting Section -->
-                <div class="advanced-section">
-                    <div class="section-title">
-                        <span>⏱️ Rate Limiting</span>
-                    </div>
-
-                    <div class="rate-limit-warning">
-                        <span class="rate-limit-warning-icon">⚠️</span>
-                        <span
-                            ><strong>Warning:</strong> Don't mess with these settings if you don't know what this is about. Incorrect rate limiting
-                            settings may cause the application to stop working properly or hit API limits unexpectedly.</span
-                        >
-                    </div>
-
-                    <div class="form-grid">
-                        <div class="checkbox-group">
-                            <input
-                                type="checkbox"
-                                class="checkbox-input"
-                                id="throttle-tokens"
-                                .checked=${this.throttleTokens}
-                                @change=${this.handleThrottleTokensChange}
-                            />
-                            <label for="throttle-tokens" class="checkbox-label"> Throttle tokens when close to rate limit </label>
-                        </div>
-
-                        <div class="rate-limit-controls ${this.throttleTokens ? 'enabled' : ''}">
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label class="form-label">Max Allowed Tokens Per Minute</label>
-                                    <input
-                                        type="number"
-                                        class="form-control"
-                                        .value=${this.maxTokensPerMin}
-                                        min="1000"
-                                        max="10000000"
-                                        step="1000"
-                                        @input=${this.handleMaxTokensChange}
-                                        ?disabled=${!this.throttleTokens}
-                                    />
-                                    <div class="form-description">Maximum number of tokens allowed per minute before throttling kicks in</div>
-                                </div>
-
-                                <div class="form-group">
-                                    <label class="form-label">Throttle At Percent</label>
-                                    <input
-                                        type="number"
-                                        class="form-control"
-                                        .value=${this.throttleAtPercent}
-                                        min="1"
-                                        max="99"
-                                        step="1"
-                                        @input=${this.handleThrottlePercentChange}
-                                        ?disabled=${!this.throttleTokens}
-                                    />
-                                    <div class="form-description">
-                                        Start throttling when this percentage of the limit is reached (${this.throttleAtPercent}% =
-                                        ${Math.floor((this.maxTokensPerMin * this.throttleAtPercent) / 100)} tokens)
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="rate-limit-reset">
-                                <button class="action-button" @click=${this.resetRateLimitSettings} ?disabled=${!this.throttleTokens}>
-                                    Reset to Defaults
-                                </button>
-                                <div class="form-description" style="margin-top: 8px;">Reset rate limiting settings to default values</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-
 
                 <!-- Data Management Section -->
                 <div class="advanced-section danger-section">

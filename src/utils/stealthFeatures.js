@@ -41,7 +41,7 @@ function applyStealthMeasures(mainWindow) {
         }
     }
 
-    // Prevent screenshots if content protection is enabled
+    // Keep the overlay excluded from capture where the OS capture API supports it.
     try {
         mainWindow.setContentProtection(true);
         console.log('Content protection enabled');

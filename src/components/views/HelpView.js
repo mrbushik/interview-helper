@@ -256,6 +256,10 @@ export class HelpView extends LitElement {
             moveDown: isMac ? 'Alt+Down' : 'Ctrl+Down',
             moveLeft: isMac ? 'Alt+Left' : 'Ctrl+Left',
             moveRight: isMac ? 'Alt+Right' : 'Ctrl+Right',
+            decreaseWidth: 'Alt+Shift+Left',
+            increaseWidth: 'Alt+Shift+Right',
+            decreaseHeight: 'Alt+Shift+Up',
+            increaseHeight: 'Alt+Shift+Down',
             toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
             toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
             nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
@@ -332,6 +336,26 @@ export class HelpView extends LitElement {
                             <div class="shortcut-item">
                                 <span class="shortcut-description">Move window right</span>
                                 <div class="shortcut-keys">${this.formatKeybind(this.keybinds.moveRight)}</div>
+                            </div>
+                        </div>
+
+                        <div class="keyboard-group">
+                            <div class="keyboard-group-title">Window Size</div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-description">Decrease window width</span>
+                                <div class="shortcut-keys">${this.formatKeybind(this.keybinds.decreaseWidth)}</div>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-description">Increase window width</span>
+                                <div class="shortcut-keys">${this.formatKeybind(this.keybinds.increaseWidth)}</div>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-description">Decrease window height</span>
+                                <div class="shortcut-keys">${this.formatKeybind(this.keybinds.decreaseHeight)}</div>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-description">Increase window height</span>
+                                <div class="shortcut-keys">${this.formatKeybind(this.keybinds.increaseHeight)}</div>
                             </div>
                         </div>
 
